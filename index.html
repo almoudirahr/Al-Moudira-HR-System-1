@@ -250,7 +250,7 @@ window.addEventListener('error',function(e){var a=document.getElementById('app')
 <script>
 'use strict';
 /* ═══════════════════ MODO HR — Web ERP (converted from HR_System_v65.py) ═══════════════════ */
-const APP='Al-Moudira HR System', VER='Web 2.0', STORE='modo_hr_web_v1', SESS='modo_hr_session';
+const APP='Al-Moudira HR System', VER='Web 2.1 Secure', STORE='modo_hr_web_v1', SESS='modo_hr_session';
 const S={lang:'ar',user:null,role:null,flash:null,srch:{},tmp:{}};
 let DB=null;
 
@@ -488,6 +488,21 @@ if(['123','1234','12345','123456','12345678','admin','admin123','password'].incl
 if(n!==fv(f,'np2')){notify(L('Passwords do not match','كلمتا المرور غير متطابقتين'),'err');return}
 try{const pr=await srvProof(S.user,cur);const sl=pwSalt();await onCall({action:'chpw',old:pr,salt:sl,proof:_pwd(sl,n)},60000);log('Change password',S.user,'security');saveDB();notify(L('Password changed','تم تغيير كلمة المرور'));render()}catch(x){notify(x.message,'err')}}
 function srvExpired(){if(!S.user)return;ONL.tok='';SS.del('modo_hr_tok');S.user=null;S.role=null;SS.del(SESS);try{ST.del(SESS2)}catch(e){}ROUTE='';render();setTimeout(()=>{try{lgFail('⏳ '+L('Session expired, sign in again','انتهت الجلسة، سجّل الدخول من جديد'))}catch(e){}},50)}
+/* ── Excel backup (all data, one sheet per table; no passwords / PINs / keys) ── */
+function bkCard(){if(typeof isAdmin==='function'&&!isAdmin())return '';return `<div class="card"><h3>💾 ${L('Backup','النسخة الاحتياطية')}</h3><p class="muted">${L('Download all data as one Excel file (one sheet per table). Passwords, PINs and server keys are not included.','حمّل كل البيانات في ملف Excel واحد (شيت لكل جدول). كلمات المرور وأرقام PIN ومفاتيح السيرفر غير مضمّنة.')}</p>${btn('📥 '+L('Download Excel backup','تحميل نسخة احتياطية Excel'),'backupXlsx()','d')}</div>`}
+function bkTable(v){const list=Array.isArray(v)?v:Object.keys(v||{}).map(k=>{const o=v[k];return(o&&typeof o==='object'&&!Array.isArray(o))?Object.assign({_key:k},o):{_key:k,value:o}});
+const cols=[],seen=new Set();list.forEach(o=>{if(o&&typeof o==='object')Object.keys(o).forEach(c=>{if(!seen.has(c)){seen.add(c);cols.push(c)}})});
+const cell=x=>{if(x==null)return '';if(typeof x==='object')x=JSON.stringify(x);if(typeof x==='string'&&x.length>30000)return '[omitted: too large]';return x};
+return{cols,rows:list.map(o=>cols.map(c=>cell(o&&typeof o==='object'?o[c]:o)))}}
+function backupXlsx(){if(typeof isAdmin==='function'&&!isAdmin())return;
+const skip={user_passwords:1,mobile_punch_pins:1,language:1,custom_users:1,settings:1};
+const names=Object.keys(DB).filter(k=>!skip[k]&&DB[k]&&typeof DB[k]==='object');
+const sheets=[],counts=[];
+const d=new Date(),p2=n=>String(n).padStart(2,'0'),stamp=`${d.getFullYear()}-${p2(d.getMonth()+1)}-${p2(d.getDate())}_${p2(d.getHours())}${p2(d.getMinutes())}`;
+names.forEach(k=>{let v=DB[k];if(k==='activity_log'&&Array.isArray(v))v=v.slice(-5000);const t=bkTable(v);if(!t.rows.length)return;counts.push([k,t.rows.length]);sheets.push({name:k.slice(0,31),aoa:[t.cols,...t.rows],rtl:false})});
+const users=Object.keys(DB.custom_users||{}).map(u=>[u,(DB.custom_users[u]||{}).role||'']);if(users.length){counts.push(['users (no passwords)',users.length]);sheets.push({name:'users',aoa:[['user','role'],...users],rtl:false})}
+sheets.unshift({name:'README',aoa:[['Al-Moudira HR — backup'],['Generated',stamp.replace('_',' ')],['By',S.user||''],['Excluded','passwords, PINs, server keys, logo'],[],['Sheet','Rows'],...counts],rtl:false});
+xlsxOut(`HR_Backup_${stamp}.xlsx`,sheets);log('Backup','Excel backup downloaded','security');saveDB();notify(L('Backup downloaded','تم تحميل النسخة الاحتياطية'))}
 function allUsers(){const u={};for(const k in DEFAULT_USERS)u[k]={pw:DEFAULT_USERS[k][0],role:DEFAULT_USERS[k][1],custom:false};for(const k in DB.custom_users)u[k]={pw:DB.custom_users[k].password,role:DB.custom_users[k].role,custom:true};return u}
 function userPw(u){const all=allUsers();return (DB.user_passwords&&DB.user_passwords[u])||(all[u]&&all[u].pw)||''}
 function roleDefault(role){const tags={dashboard:'all',employees:'all',departments:'all',change_of_status:'all',contracts:'all',resignations:'all',attendance:'all',fingerprint:'all',leaves:'leaves',payroll:'payroll',salary_slip:'payroll',advances:'advances',cl_staff:'all',penalties:'all',reports:'all',employee_situations:'all',evaluation:'eval',contract_renewal:'all',settings:'all'};
@@ -2668,7 +2683,7 @@ window.addEventListener('focus',()=>{if(onlineOn())onCycle()});
 
 /* Settings → Online */
 function setSync(){const c=onCfg();const on=onlineOn();const st=!on?badge(L('Off','غير مفعّل'),'mut'):ONL.status==='err'?badge(L('Not connected','غير متصل'),'bad'):badge(L('Connected','متصل'),'ok');
- return `<form id="onf" onsubmit="return false"><div class="card"><h3>🌐 ${L('Online — all users at the same time','تشغيل أون لاين — كل المستخدمين في نفس الوقت')} ${st}</h3>
+ return `<form id="onf" onsubmit="return false">${typeof bkCard==='function'?bkCard():''}<div class="card"><h3>🌐 ${L('Online — all users at the same time','تشغيل أون لاين — كل المستخدمين في نفس الوقت')} ${st}</h3>
  <p class="muted">${L('Every user (hotel PCs, phones, home) works on the same live data at the same time. Each change is sent alone and appears on all other screens within seconds — no overwriting each other. Data is stored in your own Google Drive, free.','كل المستخدمين (أجهزة الفندق والموبايلات ومن البيت) يعملون على نفس البيانات الحية في نفس الوقت. كل تعديل يُرسل وحده ويظهر عند الباقين خلال ثوانٍ — بدون أن يمسح أحد شغل الآخر. البيانات محفوظة في Google Drive الخاص بك مجاناً.')}</p>
  <div class="grid">${fld(L('Server URL (Web App)','رابط الخادم (Web App URL)'),`<input type="text" name="url" dir="ltr" placeholder="https://script.google.com/macros/s/.../exec" value="${esc(c.url)}">`,1)}${fld(L('Key (same as KEY in the server code)','المفتاح (نفس KEY في كود الخادم)'),`<input type="text" name="key" dir="ltr" value="${esc(c.key)}">`)}</div>
  ${ONL.err&&on?`<div class="warn mt">⚠ ${esc(ONL.err)}</div>`:''}
