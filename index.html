@@ -488,21 +488,41 @@ if(['123','1234','12345','123456','12345678','admin','admin123','password'].incl
 if(n!==fv(f,'np2')){notify(L('Passwords do not match','كلمتا المرور غير متطابقتين'),'err');return}
 try{const pr=await srvProof(S.user,cur);const sl=pwSalt();await onCall({action:'chpw',old:pr,salt:sl,proof:_pwd(sl,n)},60000);log('Change password',S.user,'security');saveDB();notify(L('Password changed','تم تغيير كلمة المرور'));render()}catch(x){notify(x.message,'err')}}
 function srvExpired(){if(!S.user)return;ONL.tok='';SS.del('modo_hr_tok');S.user=null;S.role=null;SS.del(SESS);try{ST.del(SESS2)}catch(e){}ROUTE='';render();setTimeout(()=>{try{lgFail('⏳ '+L('Session expired, sign in again','انتهت الجلسة، سجّل الدخول من جديد'))}catch(e){}},50)}
-/* ── Excel backup (all data, one sheet per table; no passwords / PINs / keys) ── */
-function bkCard(){if(typeof isAdmin==='function'&&!isAdmin())return '';return `<div class="card"><h3>💾 ${L('Backup','النسخة الاحتياطية')}</h3><p class="muted">${L('Download all data as one Excel file (one sheet per table). Passwords, PINs and server keys are not included.','حمّل كل البيانات في ملف Excel واحد (شيت لكل جدول). كلمات المرور وأرقام PIN ومفاتيح السيرفر غير مضمّنة.')}</p>${btn('📥 '+L('Download Excel backup','تحميل نسخة احتياطية Excel'),'backupXlsx()','d')}</div>`}
-function bkTable(v){const list=Array.isArray(v)?v:Object.keys(v||{}).map(k=>{const o=v[k];return(o&&typeof o==='object'&&!Array.isArray(o))?Object.assign({_key:k},o):{_key:k,value:o}});
-const cols=[],seen=new Set();list.forEach(o=>{if(o&&typeof o==='object')Object.keys(o).forEach(c=>{if(!seen.has(c)){seen.add(c);cols.push(c)}})});
-const cell=x=>{if(x==null)return '';if(typeof x==='object')x=JSON.stringify(x);if(typeof x==='string'&&x.length>30000)return '[omitted: too large]';return x};
-return{cols,rows:list.map(o=>cols.map(c=>cell(o&&typeof o==='object'?o[c]:o)))}}
-function backupXlsx(){if(typeof isAdmin==='function'&&!isAdmin())return;
-const skip={user_passwords:1,mobile_punch_pins:1,language:1,custom_users:1,settings:1};
-const names=Object.keys(DB).filter(k=>!skip[k]&&DB[k]&&typeof DB[k]==='object');
-const sheets=[],counts=[];
-const d=new Date(),p2=n=>String(n).padStart(2,'0'),stamp=`${d.getFullYear()}-${p2(d.getMonth()+1)}-${p2(d.getDate())}_${p2(d.getHours())}${p2(d.getMinutes())}`;
-names.forEach(k=>{let v=DB[k];if(k==='activity_log'&&Array.isArray(v))v=v.slice(-5000);const t=bkTable(v);if(!t.rows.length)return;counts.push([k,t.rows.length]);sheets.push({name:k.slice(0,31),aoa:[t.cols,...t.rows],rtl:false})});
-const users=Object.keys(DB.custom_users||{}).map(u=>[u,(DB.custom_users[u]||{}).role||'']);if(users.length){counts.push(['users (no passwords)',users.length]);sheets.push({name:'users',aoa:[['user','role'],...users],rtl:false})}
-sheets.unshift({name:'README',aoa:[['Al-Moudira HR — backup'],['Generated',stamp.replace('_',' ')],['By',S.user||''],['Excluded','passwords, PINs, server keys, logo'],[],['Sheet','Rows'],...counts],rtl:false});
-xlsxOut(`HR_Backup_${stamp}.xlsx`,sheets);log('Backup','Excel backup downloaded','security');saveDB();notify(L('Backup downloaded','تم تحميل النسخة الاحتياطية'))}
+/* ── HR_Backup.xlsx: same layout as the desktop program (12 sheets + hidden _HRDATA_ snapshot) ── */
+const BK_W={Employees:18,Departments:[12,28,14],Attendance:[10,22,14,12,12,12],Leaves:[10,10,22,16,14,14,28,12],Advances:[12,10,22,12,14,28,12,14],Penalties:[12,10,22,12,14,10,14,10,28,14,12,12],Payrolls:[12,10,22,8,8,14,14,14,14,14,12],Evaluations:[10,10,22,14,14,12,10,10,10,30,30],'Contract Renewals':[12,10,22,14,14,14,14,14,28],'Change of Status':[10,10,22,14,18,18,12,18,18,12,10,10,10,16,24],Settings:[28,20]};
+function bkT(t){const m=/^(\d{1,2}):(\d{2})/.exec(String(t||''));if(!m)return t||null;let h=+m[1];const ap=h>=12?'PM':'AM';h=h%12||12;return String(h).padStart(2,'0')+':'+m[2]+' '+ap}
+async function backupXlsx(){if(typeof isAdmin==='function'&&!isAdmin())return;let X;
+try{notify(L('Preparing backup…','جاري تجهيز النسخة…'),'info');X=await loadExcelJS()}catch(e){notify(e.message,'err');return}
+const E=v=>(v===''||v==null)?null:v,nm=id=>{const e=DB.employees[id];return e?e.name:null},dn=v=>v?deptName(v):null,yn=v=>v===true?'Yes':v===false?'No':v,D=v=>E(v)?fmtD(v):null,T=v=>E(v)?bkT(v):null,has=(r,x)=>(r.reasons||[]).includes(x)?'Yes':'No';
+const dRule=k=>/date|_issue$|_expiry$|_renewal$/.test(k)&&!/_area$|_number$/.test(k);
+const ec=EMP_XL.filter(x=>!['arabic_name','insurance_number','emp_class'].includes(x[0])).map(([k,h])=>[k,k==='name'?'First Name':h]);
+const emps=Object.values(DB.employees).sort((a,b)=>deptRank(deptName(a.department))-deptRank(deptName(b.department))||String(a.name).localeCompare(b.name));
+const ins=DB.insurance_settings||{},d0=new Date(),bd=`${pad(d0.getDate())}/${pad(d0.getMonth()+1)}/${d0.getFullYear()} ${pad(d0.getHours())}:${pad(d0.getMinutes())}`;
+const sheets=[
+['Employees',ec.map(x=>x[1]),emps.map(e=>ec.map(([k])=>{const v=e[k];if(k==='department')return dn(v);if(typeof v==='boolean')return yn(v);return dRule(k)?D(v):E(v)}))],
+['Departments',['Dept ID','Name','Manager ID'],Object.values(DB.departments).sort((a,b)=>String(a.dept_id).localeCompare(String(b.dept_id))).map(d=>[d.dept_id,d.name,E(d.manager_id)])],
+['Attendance',['Emp ID','Emp Name','Date','Check In','Check Out','Status'],DB.attendance.map(r=>[r.emp_id,nm(r.emp_id),D(r.date),T(r.check_in),T(r.check_out),E(r.status)])],
+['Leaves',['Leave ID','Emp ID','Emp Name','Type','Start Date','End Date','Reason','Status'],DB.leaves.map(r=>[r.leave_id,r.emp_id,nm(r.emp_id),E(r.leave_type),D(r.start_date),D(r.end_date),E(r.reason),E(r.status)])],
+['Advances',['Advance ID','Emp ID','Emp Name','Amount','Date','Reason','Status','Repaid Amount'],DB.advances.map(r=>[r.advance_id,r.emp_id,nm(r.emp_id),r.amount,D(r.date),E(r.reason),E(r.status),r.repaid_amount||0])],
+['Penalties',['Penalty ID','Emp ID','Emp Name','Amount','Date','Time','Type','Duration','Reason','Add. Penalty','Occurrence','Status'],DB.penalties.map(r=>[r.penalty_id,r.emp_id,nm(r.emp_id),r.amount,D(r.date),E(r.time),E(r.penalty_type),r.duration,E(r.reason),r.additional_penalty||0,r.absence_occurrence||0,E(r.status)])],
+['Payrolls',['Payroll ID','Emp ID','Emp Name','Month','Year','Basic Salary','Allowances','Deductions','Net Salary','Service Charge','Tax'],DB.payrolls.map(r=>[r.payroll_id,r.emp_id,nm(r.emp_id),r.month,r.year,r.basic_salary,r.allowances,r.deductions,r.net_salary,r.service_charge,r.tax])],
+['Evaluations',['Eval ID','Emp ID','Emp Name','Grade','Date','Type','Probation','6 Months','1 Year','Supervisor Notes','Comments'],DB.evaluations.map(r=>[r.eval_id,r.emp_id,nm(r.emp_id),E(r.grade),D(r.date||r.eval_date),E(r.eval_type),yn(!!r.probation_period),yn(!!r.after_6_months),yn(!!r.after_1_year),E(r.supervisor_notes),E(r.comments)])],
+['Contract Renewals',['Renewal ID','Emp ID','Emp Name','Old Start','Old End','New Start','New End','Renewal Date','Notes'],DB.contract_renewals.map(r=>[r.renewal_id,r.emp_id,nm(r.emp_id)||E(r.name),D(r.old_start),D(r.old_end),D(r.new_start),D(r.new_end),D(r.renewal_date),E(r.notes)])],
+['Change of Status',['COS ID','Emp ID','Emp Name','Effective Date','From Dept','From Position','From Salary','To Dept','To Position','To Salary','Transfer','Promotion','Increase','Warning','Notes'],DB.change_of_status.map(r=>[r.cos_id,r.emp_id,nm(r.emp_id)||E(r.name),D(r.effective_date),dn(r.old_department),E(r.old_position),r.old_salary,dn(r.new_department),E(r.new_position),r.new_salary,has(r,'Transfer'),has(r,'Promotion'),has(r,'Increase'),(r.reasons||[]).includes('Warning Record / Misconduct')?'Yes':null,E(r.notes)])],
+['Settings',['Setting','Value'],[['Insurance Min Base',ins.min],['Insurance Max Base',ins.max],['Backup Date',bd]]]];
+const wb=new X.Workbook();wb.creator='Al-Moudira HR';
+const th={style:'thin',color:{argb:'FFCBD5E1'}},bo={top:th,left:th,bottom:th,right:th},pf=c=>({type:'pattern',pattern:'solid',fgColor:{argb:c}}),hf=pf('FF1E3A5F'),hfont={name:'Calibri',size:10,bold:true,color:{argb:'FFFFFFFF'}},dfont={name:'Calibri',size:9},fl=[pf('FFFFFFFF'),pf('FFF8FAFC')],ha={horizontal:'center',vertical:'middle',wrapText:true},da={horizontal:'left'};
+sheets.forEach(([name,hdr,rows])=>{const ws=wb.addWorksheet(name,{views:[{state:'frozen',ySplit:1}]});const w=BK_W[name];
+ws.columns=hdr.map((h,i)=>({width:Array.isArray(w)?w[i]||14:w||14}));
+const hr=ws.addRow(hdr);hr.height=24;hr.eachCell(c=>{c.fill=hf;c.font=hfont;c.alignment=ha;c.border=bo});
+rows.forEach((r,i)=>{ws.addRow(r).eachCell({includeEmpty:true},c=>{c.font=dfont;c.border=bo;c.fill=fl[i&1];c.alignment=da})});
+ws.autoFilter={from:{row:1,column:1},to:{row:Math.max(1,rows.length+1),column:hdr.length}}});
+const SK={settings:1,user_passwords:1,password:1,custom_users:1,mobile_punch_pins:1};
+const js=JSON.stringify(Object.fromEntries(Object.entries(DB).filter(([k])=>!SK[k])));
+const hd=wb.addWorksheet('_HRDATA_',{state:'hidden'});hd.addRow(['DO NOT EDIT — full data snapshot for restore']);
+for(let a=0;a<js.length;){let b=Math.min(a+30000,js.length);while(b<js.length&&b>a+1&&(/\s/.test(js[b-1])||/\s/.test(js[b])||/[\uD800-\uDBFF]/.test(js[b-1])))b--;hd.addRow([js.slice(a,b)]);a=b}
+const buf=await wb.xlsx.writeBuffer();dlBlob(`HR_Backup_${stamp()}${pad(d0.getSeconds())}.xlsx`,new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}));
+log('Backup','Excel backup downloaded','security');saveDB();notify(L('Backup downloaded','تم تحميل النسخة الاحتياطية'))}
 function allUsers(){const u={};for(const k in DEFAULT_USERS)u[k]={pw:DEFAULT_USERS[k][0],role:DEFAULT_USERS[k][1],custom:false};for(const k in DB.custom_users)u[k]={pw:DB.custom_users[k].password,role:DB.custom_users[k].role,custom:true};return u}
 function userPw(u){const all=allUsers();return (DB.user_passwords&&DB.user_passwords[u])||(all[u]&&all[u].pw)||''}
 function roleDefault(role){const tags={dashboard:'all',employees:'all',departments:'all',change_of_status:'all',contracts:'all',resignations:'all',attendance:'all',fingerprint:'all',leaves:'leaves',payroll:'payroll',salary_slip:'payroll',advances:'advances',cl_staff:'all',penalties:'all',reports:'all',employee_situations:'all',evaluation:'eval',contract_renewal:'all',settings:'all'};
@@ -1462,7 +1482,7 @@ function saveUser(old){const f=F();const u=fv(f,'un'),pw=fv(f,'pw'),role=fv(f,'r
  if(pw&&pw.length<8){notify(L('Password must be at least 8 characters','كلمة المرور 8 أحرف على الأقل'),'err');return}if(!old){if(all[u]){notify(L('User already exists','المستخدم موجود'),'err');return}if(!pw){notify(L('Password required','كلمة المرور مطلوبة'),'err');return}DB.custom_users[u]={password:pwHash(pw),role}}
  else{if(pw)DB.user_passwords[u]=pwHash(pw);if(DB.custom_users[u]){DB.custom_users[u].role=role;if(pw)DB.custom_users[u].password=DB.user_passwords[u]}}if(u===S.user&&typeof sessSave==='function')sessSave(S.user,S.role);
  DB.user_permissions[u]=$$('.pchk').filter(c=>c.checked).map(c=>c.value);log(old?'Edit user':'Add user',u,'security');saveDB();setFlash(L('User saved','تم حفظ المستخدم'));go('settings/users')}
-function setData(){const sz=(JSON.stringify(DB).length/1048576).toFixed(2);return `<div class="card"><h3>💾 ${L('Backup Data','نسخ احتياطي')}</h3><p class="muted">${L('Database size','حجم البيانات')}: ${sz} MB — ${Object.keys(DB.employees).length} ${L('employees','موظف')}, ${DB.attendance.length} ${L('attendance rows','سجل حضور')}</p>${btn('💾 '+L('Backup Now (JSON)','نسخ احتياطي الآن (JSON)'),'backupNow()','g')}</div>
+function setData(){const sz=(JSON.stringify(DB).length/1048576).toFixed(2);return `<div class="card"><h3>💾 ${L('Backup Data','نسخ احتياطي')}</h3><p class="muted">${L('Database size','حجم البيانات')}: ${sz} MB — ${Object.keys(DB.employees).length} ${L('employees','موظف')}, ${DB.attendance.length} ${L('attendance rows','سجل حضور')}</p>${btn('💾 '+L('Backup Now (JSON)','نسخ احتياطي الآن (JSON)'),'backupNow()','g')} ${btn('📥 '+L('Backup to Excel','نسخ احتياطي Excel'),'backupXlsx()','d')}<p class="muted" style="margin-top:8px">${L('The Excel file has the same layout as the desktop HR_Backup (no passwords). To restore, choose the same file below under Restore.','ملف Excel بنفس تنسيق HR_Backup بتاع الديسكتوب (بدون كلمات مرور). للاسترجاع اختار نفس الملف من «استرجاع» تحت.')}</p></div>
  <div class="card"><h3>📂 ${L('Restore / Import from desktop v65 (JSON or Excel backup)','استرجاع / استيراد من نسخة الديسكتوب v65 (نسخة JSON أو Excel)')}</h3><p class="muted">${L('Choose a backup JSON from this web app, or the hr_data.json file of the Python desktop program — all employees, attendance, leaves, payroll, advances, penalties, CL staff, evaluations, renewals, change of status, archive and users are imported.','اختر نسخة JSON من هذا البرنامج أو ملف hr_data.json من برنامج الديسكتوب (بايثون) — يتم استيراد كل الموظفين والحضور والإجازات والمرتبات والسلف والجزاءات وخصم العاملين والتقييمات والتجديدات وتغيير الحالة والأرشيف والمستخدمين.')}</p>
  <input type="file" id="rsF" accept=".json,.xlsx,.xls,application/json"> <label class="chk"><input type="checkbox" id="rsM"> ${L('Merge into current data instead of replacing','دمج مع البيانات الحالية بدلاً من الاستبدال')}</label>${dbtn('📂 '+L('Restore','استرجاع'),'restoreNow()','b')}</div>
  <div class="card"><h3>📥 ${L('Import Employees from Excel','استيراد الموظفين من Excel')}</h3>${btn('📥 '+L('Open import page','فتح صفحة الاستيراد'),"go('employees/import')",'b')}</div>
@@ -1496,6 +1516,10 @@ function empFromRow(o,existing){const e=Object.assign({},EMP_DEF,existing||{});
   e[k]=v});
  if(!e.arabic_name)e.arabic_name=translit(e.name);return e}
 function importBackupBook(book,replace){const S_=book.sheets;const R={};const has=n=>S_[n]&&S_[n].length>1;
+ {const hd=S_['_hrdata_'];if(replace&&hd&&hd.length>1){let inc=null;try{inc=JSON.parse(hd.slice(1).map(r=>r[0]==null?'':String(r[0])).join(''))}catch(e){inc=null}
+  if(inc&&inc.employees&&typeof inc.employees==='object'){const keep={sync_url:DB.settings.sync_url,sync_key:DB.settings.sync_key,logo:DB.settings.logo,company:DB.settings.company,company_ar:DB.settings.company_ar,signatory:DB.settings.signatory};const keepUsers={custom_users:DB.custom_users,user_passwords:DB.user_passwords,user_permissions:DB.user_permissions,disabled_users:DB.disabled_users,activity_log:DB.activity_log};['settings','user_passwords','password','custom_users','user_permissions','disabled_users','mobile_punch_pins'].forEach(k=>delete inc[k]);
+   DB=normalizeDB(Object.assign(blankDB(),inc,keepUsers));Object.assign(DB.settings,keep);DB.language=S.lang;['employees','departments'].forEach(k=>R[k]=Object.keys(DB[k]||{}).length);['attendance','leaves','advances','cl_staff','penalties','payrolls','evaluations','contract_renewals','change_of_status'].forEach(k=>R[k]=(DB[k]||[]).length);return R}}}
+
  if(replace){const keep={sync_url:DB.settings.sync_url,sync_key:DB.settings.sync_key,logo:DB.settings.logo,company:DB.settings.company,company_ar:DB.settings.company_ar,signatory:DB.settings.signatory};const keepUsers={custom_users:DB.custom_users,user_passwords:DB.user_passwords,user_permissions:DB.user_permissions,disabled_users:DB.disabled_users,activity_log:DB.activity_log};
   DB=Object.assign(blankDB(),keepUsers);Object.assign(DB.settings,keep);DB.language=S.lang}
  if(has('departments')){let n=0;sheetObjs(S_['departments']).forEach(o=>{const id=g(o,'dept id','dept_id','id'),nm=g(o,'name');if(!id||!nm)return;DB.departments[id]={dept_id:id,name:nm,manager_id:g(o,'manager id','manager_id')};n++});R.departments=n}
@@ -2683,7 +2707,7 @@ window.addEventListener('focus',()=>{if(onlineOn())onCycle()});
 
 /* Settings → Online */
 function setSync(){const c=onCfg();const on=onlineOn();const st=!on?badge(L('Off','غير مفعّل'),'mut'):ONL.status==='err'?badge(L('Not connected','غير متصل'),'bad'):badge(L('Connected','متصل'),'ok');
- return `<form id="onf" onsubmit="return false">${typeof bkCard==='function'?bkCard():''}<div class="card"><h3>🌐 ${L('Online — all users at the same time','تشغيل أون لاين — كل المستخدمين في نفس الوقت')} ${st}</h3>
+ return `<form id="onf" onsubmit="return false"><div class="card"><h3>🌐 ${L('Online — all users at the same time','تشغيل أون لاين — كل المستخدمين في نفس الوقت')} ${st}</h3>
  <p class="muted">${L('Every user (hotel PCs, phones, home) works on the same live data at the same time. Each change is sent alone and appears on all other screens within seconds — no overwriting each other. Data is stored in your own Google Drive, free.','كل المستخدمين (أجهزة الفندق والموبايلات ومن البيت) يعملون على نفس البيانات الحية في نفس الوقت. كل تعديل يُرسل وحده ويظهر عند الباقين خلال ثوانٍ — بدون أن يمسح أحد شغل الآخر. البيانات محفوظة في Google Drive الخاص بك مجاناً.')}</p>
  <div class="grid">${fld(L('Server URL (Web App)','رابط الخادم (Web App URL)'),`<input type="text" name="url" dir="ltr" placeholder="https://script.google.com/macros/s/.../exec" value="${esc(c.url)}">`,1)}${fld(L('Key (same as KEY in the server code)','المفتاح (نفس KEY في كود الخادم)'),`<input type="text" name="key" dir="ltr" value="${esc(c.key)}">`)}</div>
  ${ONL.err&&on?`<div class="warn mt">⚠ ${esc(ONL.err)}</div>`:''}
