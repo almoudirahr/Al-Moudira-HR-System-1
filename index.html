@@ -423,7 +423,7 @@ const IDB={db:null,ok:false,open(){return new Promise(res=>{try{const r=indexedD
 async function loadDB(){let raw=null;if(await IDB.open())raw=await IDB.get(STORE);if(!raw)raw=ST.get(STORE);
  try{DB=normalizeDB(raw?JSON.parse(raw):blankDB())}catch(e){DB=blankDB()}S.lang=DB.language==='en'?'en':'ar'}
 let _persistT=null,_persistBusy=false,_persistAgain=false;
-async function persist(){if(_persistBusy){_persistAgain=true;return}_persistBusy=true;const txt=JSON.stringify(DB);let ok=false;
+async function persist(){try{purgeArchivedStragglers()}catch(e){}if(_persistBusy){_persistAgain=true;return}_persistBusy=true;const txt=JSON.stringify(DB);let ok=false;
  if(IDB.ok)ok=await IDB.set(STORE,txt);
  if(ok){if(ST.get(STORE))ST.del(STORE)}else{try{ST.set(STORE,txt);ok=true}catch(e){notify(L('Browser storage is full — export a backup, then remove old attendance/photos.','مساحة التخزين ممتلئة — صدّر نسخة احتياطية ثم احذف الحضور القديم أو الصور.'),'err')}}
  _persistBusy=false;if(_persistAgain){_persistAgain=false;persist()}return ok}
@@ -1095,7 +1095,7 @@ function saveLB(id){const e=getEmp(id),f=F();const ov=(k)=>{const v=fv(f,k);retu
 ROUTES.attendance=(act,id)=>{if(act==='new'||act==='edit')return attForm(act==='edit'?+id:null);if(act==='import')return attImportPage();if(act==='count')return countDaily(id);
  const fl=S.tmp.attF||{};const fr=parseD(fl.from),to=parseD(fl.to);
  const fDep=fl.dept||'',fEmp=String(fl.emp||'').trim(),fSt=fl.status||'',fSrc=fl.source||'';const fEmpL=fEmp.toLowerCase();
- const idx=DB.attendance.map((a,i)=>i).filter(i=>{const r=DB.attendance[i];const d=parseD(r.date);if(!((!fr||(d&&d>=fr))&&(!to||(d&&d<=to))))return false;
+ const idx=DB.attendance.map((a,i)=>i).filter(i=>{const r=DB.attendance[i];if(DB.archived_employees&&DB.archived_employees[String(r.emp_id).trim()])return false;const d=parseD(r.date);if(!((!fr||(d&&d>=fr))&&(!to||(d&&d<=to))))return false;
   if(fDep||fEmp){const e=getEmp(r.emp_id);if(fDep&&(!e||String(e.department)!==fDep))return false;if(fEmp&&_nz(r.emp_id)!==_nz(fEmp)&&!(e&&(String(e.name||'').toLowerCase().includes(fEmpL)||String(e.arabic_name||'').includes(fEmp))))return false}
   if(fSt&&attStatus(r)!==fSt)return false;if(fSrc){const sc=String(r.source||'').split('+').filter(Boolean);if(fSrc==='manual'?sc.some(x=>x==='device'||x==='mobile'):!sc.includes(fSrc))return false}return true});
  idx.sort((x,y)=>{const a=DB.attendance[x],b=DB.attendance[y];return (parseD(b.date)||0)-(parseD(a.date)||0)||String(a.emp_id).localeCompare(String(b.emp_id),undefined,{numeric:true})});
@@ -1224,7 +1224,7 @@ function attDeptXlsAsk(){const [mo,yr]=curPeriod();const m=prompt(L('Month (1-12
 
 /* ═══════════════════ Payroll ═══════════════════ */
 ROUTES.payroll=(act,id)=>{if(act==='calc')return payCalcPage();if(act==='edit')return payEdit(DB.payrolls.find(p=>p.payroll_id===id));if(act==='monthly')return monthlyPage(id);if(act==='archive')return archivePage(id);if(act==='stopped')return stoppedPage();if(act==='delete')return payDelPage();
- const rows=[...DB.payrolls].reverse().filter(p=>{const e=getEmp(p.emp_id);return !(e&&isResigned(e))}).map(p=>{const e=getEmp(p.emp_id);return {c:[esc(p.payroll_id),esc(p.emp_id),esc(e?e.name:'—'),esc(tv(empDept(e))),monthName(p.month),p.year,money(p.basic_salary),money(p.service_charge),money(p.deductions),money(p.tax),`<b>${money(p.net_salary)}</b>`,`<div class="acts">${btn('✏️','go('+q('payroll/edit/'+p.payroll_id)+')','sm b')}${btn('🧾','go('+q('slip/'+p.emp_id+'/'+p.year+'-'+p.month)+')','sm t')}${isAdmin()?dbtn('🗑️',`delPay(${q(p.payroll_id)})`,'sm r'):''}</div>`]}});
+ const rows=[...DB.payrolls].reverse().filter(p=>{const e=getEmp(p.emp_id);if(DB.archived_employees&&DB.archived_employees[String(p.emp_id).trim()])return false;return !(e&&isResigned(e))}).map(p=>{const e=getEmp(p.emp_id);return {c:[esc(p.payroll_id),esc(p.emp_id),esc(e?e.name:'—'),esc(tv(empDept(e))),monthName(p.month),p.year,money(p.basic_salary),money(p.service_charge),money(p.deductions),money(p.tax),`<b>${money(p.net_salary)}</b>`,`<div class="acts">${btn('✏️','go('+q('payroll/edit/'+p.payroll_id)+')','sm b')}${btn('🧾','go('+q('slip/'+p.emp_id+'/'+p.year+'-'+p.month)+')','sm t')}${isAdmin()?dbtn('🗑️',`delPay(${q(p.payroll_id)})`,'sm r'):''}</div>`]}});
  return head('💰',L('Payroll','المرتبات'),L('Manage employee salaries','إدارة مرتبات الموظفين'),'#EC4899',btn('🧾 '+L('Calculate All','حساب الكل'),"go('payroll/calc')",'v sm')+btn('📊 '+L('Monthly Report','التقرير الشهري'),"go('payroll/monthly')",'b sm')+btn('📊 Excel',`xlsVisible(${q(L('Payroll','المرتبات'))},'tpay')`,'ghost sm')+moreMenu([['🗄️ '+L('Archive','الأرشيف'),"go('payroll/archive')"],['🚫 '+L('Stopped Salaries','مرتبات موقوفة'),"go('payroll/stopped')"],['🖨️ '+L('Print','طباعة'),`printVisible(${q(L('Payroll','المرتبات'))},'tpay')`],...(isAdmin()?[['🗑️ '+L('Delete by period','حذف حسب الفترة'),"go('payroll/delete')"]]:[])]))
  +`<div class="wrap">${searchBox('tpay')}${table([L('ID','الرقم'),L('Code','الكود'),L('Name','الاسم'),L('Department','القسم'),L('Month','الشهر'),L('Year','السنة'),L('Basic','الأساسي'),L('Service','الخدمة'),L('Deductions','الخصومات'),L('Tax','الضريبة'),L('Net','الصافي'),L('Actions','إجراءات')],rows,{id:'tpay'})}</div>`};
 function delPay(id){DB.payrolls=DB.payrolls.filter(x=>x.payroll_id!==id);log('Delete payroll',id,'payroll');saveDB();notify(L('Deleted','تم الحذف'));render()}
@@ -1791,6 +1791,27 @@ function archiveEmp(id,rdate,reason){const e=DB.employees[id];if(!e)return false
  const records={};ARCHIVE_COLLS.forEach(c=>{const mine=(DB[c]||[]).filter(r=>String(r.emp_id)===String(id));if(mine.length){records[c]=mine;DB[c]=DB[c].filter(r=>String(r.emp_id)!==String(id))}});
  DB.archived_employees[id]={employee:JSON.parse(JSON.stringify(e)),records,leave_summary:ls,archived_at:nowStamp()};
  delete DB.mobile_punch_pins[id];delete DB.employees[id];log('Employee resigned → archived',`${esc(e.name)} (${id}) on ${e.resignation_date}`,'employees');return true}
+/* ═══ Safety net: keep resigned employees out of active lists ═══
+   Moves any employee still marked resigned into the archive, and moves any
+   attendance/payroll/leave/etc. row belonging to an archived employee into
+   that employee's archive record (device pulls, imports, mobile punches can add rows later). */
+function purgeArchivedStragglers(){
+  let n=0;
+  try{n+=migrateResigned()||0}catch(e){}
+  if(!DB.archived_employees||typeof DB.archived_employees!=='object')DB.archived_employees={};
+  ARCHIVE_COLLS.forEach(c=>{
+    if(!Array.isArray(DB[c]))return;
+    const keep=[];
+    DB[c].forEach(r=>{
+      const id=String(r&&r.emp_id!=null?r.emp_id:'').trim();
+      const a=DB.archived_employees[id];
+      if(a){a.records=a.records||{};(a.records[c]=a.records[c]||[]).push(r);n++}
+      else keep.push(r);
+    });
+    DB[c]=keep;
+  });
+  return n;
+}
 function restoreArchived(id){const a=DB.archived_employees[id];if(!a)return [false,L('Not in archive','غير موجود في الأرشيف')];if(DB.employees[id])return [false,L('An active employee already has this ID','يوجد موظف نشط بنفس الكود')];
  const e=Object.assign({},EMP_DEF,a.employee);e.resignation_date='';e.resignation_reason='';e.salary_active=true;DB.employees[id]=e;
  Object.entries(a.records||{}).forEach(([c,rows])=>{if(Array.isArray(DB[c]))rows.forEach(r=>DB[c].push(r))});delete DB.archived_employees[id];log('Employee restored from archive',`${esc(e.name)} (${id})`,'employees');return [true,'']}
@@ -2837,7 +2858,7 @@ async function onHashConnect(){const h=(()=>{try{return location.hash}catch(e){r
 
 /* ═══════════════════ Boot ═══════════════════ */
 function autoArchive(){if(!Object.keys(DB.employees).length)return;const t=today();let m=t.getMonth()+1,y=t.getFullYear();if(t.getDate()<25){m--;if(m<1){m=12;y--}}if(archiveSnapshot(m,y,false)){log('Auto archive',`${pad(m)}-${y}`,'payroll');saveDB()}}
-async function boot(){await loadDB();try{if(typeof onSeenSnap==='function')onSeenSnap()}catch(e){}try{const mv=migrateResigned();if(mv){persist();setFlash(L(`${mv} resigned employee(s) moved to the Resignations archive.`,`تم نقل ${mv} موظف مستقيل إلى أرشيف الاستقالات وحذفهم من البيانات النشطة.`),'info')}}catch(e){}try{const v=sessValid(sessRead());if(v){S.user=v.u;S.role=v.r;SS.set(SESS,JSON.stringify({u:v.u,r:v.r}))}else{try{ST.del(SESS2)}catch(e){}SS.del(SESS)}}catch(e){}
+async function boot(){await loadDB();try{if(typeof onSeenSnap==='function')onSeenSnap()}catch(e){}try{const mv=migrateResigned();try{purgeArchivedStragglers()}catch(e){}if(mv){persist();setFlash(L(`${mv} resigned employee(s) moved to the Resignations archive.`,`تم نقل ${mv} موظف مستقيل إلى أرشيف الاستقالات وحذفهم من البيانات النشطة.`),'info')}}catch(e){}try{const v=sessValid(sessRead());if(v){S.user=v.u;S.role=v.r;SS.set(SESS,JSON.stringify({u:v.u,r:v.r}))}else{try{ST.del(SESS2)}catch(e){}SS.del(SESS)}}catch(e){}
  autoArchive();render();
  onlineStart();onHashConnect();
  window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();S.tmp.installEvt=e});
