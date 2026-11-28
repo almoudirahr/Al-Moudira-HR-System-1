@@ -321,9 +321,20 @@ const round5=v=>Math.floor((num(v)+2.5)/5)*5;
 const money=v=>num(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
 const pad=n=>String(n).padStart(2,'0');
 function mkD(y,m,d){const x=new Date(y,m-1,d);return x.getFullYear()===y&&x.getMonth()===m-1&&x.getDate()===d?x:null}
+/* Ambiguous two-digit dates (e.g. "05/03/2025") are impossible to read correctly one at a time —
+   both "5 March" and "3 May" are valid. Bulk imports set this hint after scanning the WHOLE file/column
+   for a date where one position is unambiguously >12, which reveals the file's real convention. */
+let _dateFmtHint=null;
+function detectDateFormat_(vals){let bigFirst=false,bigSecond=false;
+ for(const raw of vals){const s=String(raw??'').trim();const m=s.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{2,4})/);if(!m)continue;
+  const a=+m[1],b=+m[2];if(a>12)bigFirst=true;else if(b>12)bigSecond=true}
+ if(bigFirst)return'dmy';if(bigSecond)return'mdy';return null}
+function withDateFormat_(vals,fn){const prev=_dateFmtHint;_dateFmtHint=detectDateFormat_(vals);try{return fn()}finally{_dateFmtHint=prev}}
 function parseD(s){if(!s)return null;if(s instanceof Date)return new Date(s.getFullYear(),s.getMonth(),s.getDate());s=String(s).trim();let m;
  if((m=s.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})/)))return mkD(+m[1],+m[2],+m[3]);
- if((m=s.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{2,4})/))){let y=+m[3];if(y<100)y+=(y+2000>new Date().getFullYear()+5?1900:2000);return mkD(y,+m[2],+m[1])||(+m[2]>12&&+m[1]<=12?mkD(y,+m[1],+m[2]):null)}/* day/month/year; an impossible month (e.g. 10/25/1990 from a US-format file) is read as month/day */
+ if((m=s.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{2,4})/))){let y=+m[3];if(y<100)y+=(y+2000>new Date().getFullYear()+5?1900:2000);
+  if(_dateFmtHint==='mdy')return mkD(y,+m[1],+m[2])||mkD(y,+m[2],+m[1]);
+  return mkD(y,+m[2],+m[1])||(+m[2]>12&&+m[1]<=12?mkD(y,+m[1],+m[2]):null)}/* day/month/year by default (Arabic/Egyptian convention); an impossible month, or a format confirmed by withDateFormat_ from the rest of the file, reads it as month/day */
  if(/^\d{5}(\.\d+)?$/.test(s)){const b=new Date(1899,11,30);b.setDate(b.getDate()+Math.floor(+s));return parseD(b)}
  if(/[a-z]{3}/i.test(s)&&/\d{4}/.test(s)){const x=new Date(s);if(!isNaN(x))return new Date(x.getFullYear(),x.getMonth(),x.getDate())}
  return null}
@@ -523,7 +534,7 @@ const hd=wb.addWorksheet('_HRDATA_',{state:'hidden'});hd.addRow(['DO NOT EDIT �
 for(let a=0;a<js.length;){let b=Math.min(a+30000,js.length);while(b<js.length&&b>a+1&&(/\s/.test(js[b-1])||/\s/.test(js[b])||/[\uD800-\uDBFF]/.test(js[b-1])))b--;hd.addRow([js.slice(a,b)]);a=b}
 const buf=await wb.xlsx.writeBuffer();dlBlob(`HR_Backup_${stamp()}${pad(d0.getSeconds())}.xlsx`,new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}));
 log('Backup','Excel backup downloaded','security');saveDB();notify(L('Backup downloaded','تم تحميل النسخة الاحتياطية'))}
-function allUsers(){const u={};for(const k in DEFAULT_USERS)u[k]={pw:DEFAULT_USERS[k][0],role:DEFAULT_USERS[k][1],custom:false};for(const k in DB.custom_users)u[k]={pw:DB.custom_users[k].password,role:DB.custom_users[k].role,custom:true};return u}
+function allUsers(){const u={};for(const k in DEFAULT_USERS)u[k]={pw:DEFAULT_USERS[k][0],role:DEFAULT_USERS[k][1],custom:false};for(const k in DB.custom_users)u[k]={pw:DB.custom_users[k].password||(DEFAULT_USERS[k]?DEFAULT_USERS[k][0]:undefined),role:DB.custom_users[k].role,custom:true};return u}
 function userPw(u){const all=allUsers();return (DB.user_passwords&&DB.user_passwords[u])||(all[u]&&all[u].pw)||''}
 function roleDefault(role){const tags={dashboard:'all',employees:'all',departments:'all',change_of_status:'all',contracts:'all',resignations:'all',attendance:'all',fingerprint:'all',leaves:'leaves',payroll:'payroll',salary_slip:'payroll',advances:'advances',cl_staff:'all',penalties:'all',reports:'all',employee_situations:'all',evaluation:'eval',contract_renewal:'all',settings:'all'};
  if(role==='admin'||role==='hr')return Object.keys(tags);const al=role==='leaves_payroll_eval'?['leaves','payroll','eval','advances']:role==='leaves_eval'?['leaves','eval']:Object.values(tags);
@@ -869,11 +880,36 @@ function empField([k,label,t,req],e){const v=e[k];let inner;
  else if(t==='dept')inner=sel(k,deptOpts(),v,L('— Select department —','— اختر القسم —'));else if(t==='title')inner=sel(k,[...new Set([...DB.job_titles,...Object.values(DB.employees).map(x=>x.position).filter(Boolean)])].sort(),v,true);
  else if(Array.isArray(t))inner=sel(k,t[1],v,!t[1].some(o=>Array.isArray(o)&&o[0]===''));else inner=inp(k,v,t,k==='emp_id'&&e._edit?'readonly':(k==='name'?'oninput="autoArabic(this)"':''));
  return fld(label,inner,false,req)}
+/* ── Fill the employee form from scanned documents (server action "extract") ── */
+function docCard(){return `<div class="card" id="docAI"><h3>🤖 ${L('Fill from scanned documents','تعبئة تلقائية من المستندات')}</h3><p class="muted">${L('Upload scans/photos of the national ID, certificates, etc. The data is read automatically and filled into the form — review it before saving.','ارفع صور أو سكان البطاقة والشهادات والمستندات، وهتتقرا البيانات وتتعبّى في النموذج تلقائيًا — راجعها قبل الحفظ.')}</p><div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center"><input type="file" id="docFiles" accept="image/*,application/pdf" multiple>${btn('✨ '+L('Read & fill','قراءة وتعبئة'),'docRead()','b')}</div><div id="docOut" style="margin-top:8px;font-weight:700"></div><div class="muted" style="margin-top:6px;font-size:12px">🔒 ${L('The files are sent to an AI reading service to extract the data and are not saved.','الملفات بتتبعت لخدمة قراءة ذكية لاستخراج البيانات ومبتتحفظش.')}</div></div>`}
+function docPrep(f){return new Promise((res,rej)=>{
+ if(f.type==='application/pdf'){if(f.size>6e6)return rej(new Error(L('PDF too large (max 6 MB)','ملف PDF كبير (الحد 6 ميجا)')));const r=new FileReader();r.onload=()=>res({mime:'application/pdf',data:String(r.result).split(',')[1]});r.onerror=()=>rej(new Error('read error'));r.readAsDataURL(f);return}
+ if(!/^image\//.test(f.type))return rej(new Error(L('Unsupported file','ملف غير مدعوم')));
+ const url=URL.createObjectURL(f),im=new Image();im.onload=()=>{const k=Math.min(1,1700/Math.max(im.width,im.height)),c=document.createElement('canvas');c.width=Math.round(im.width*k);c.height=Math.round(im.height*k);c.getContext('2d').drawImage(im,0,0,c.width,c.height);URL.revokeObjectURL(url);res({mime:'image/jpeg',data:c.toDataURL('image/jpeg',0.85).split(',')[1]})};
+ im.onerror=()=>{URL.revokeObjectURL(url);rej(new Error(L('Could not open the image','تعذّر فتح الصورة')))};im.src=url})}
+function docFill(fl){const form=document.getElementById('frm');if(!form)return 0;let n=0;const eg=v=>String(v==null?'':v).trim();
+ const put=(k,v)=>{v=eg(v);if(!v)return false;const el=form.querySelector(`[name="${k}"]`);if(!el||el.type==='checkbox'||el.type==='file')return false;
+  if(el.tagName==='SELECT'){const lv=v.toLowerCase(),o=[...el.options].find(x=>x.value.toLowerCase()===lv||x.textContent.trim().toLowerCase()===lv)||[...el.options].find(x=>x.value&&lv.includes(x.value.toLowerCase()));if(!o)return false;el.value=o.value}
+  else{if(eg(el.value))return false;setv(form,k,v)}
+  el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));el.style.outline='2px solid #10B981';return true};
+ const nid=eg(fl.national_id).replace(/[^\d]/g,'');
+ Object.keys(fl).forEach(k=>{let v=fl[k];if(k==='national_id'){if(nid.length!==14)return;v=nid}if(put(k,v))n++});
+ const bd=form.querySelector('[name="birth_date"]');
+ if(nid.length===14&&bd&&!eg(bd.value)){const cent=nid[0]==='2'?'19':nid[0]==='3'?'20':'',yy=nid.slice(1,3),mm=nid.slice(3,5),dd=nid.slice(5,7);if(cent&&+mm>=1&&+mm<=12&&+dd>=1&&+dd<=31&&put('birth_date',`${dd}/${mm}/${cent}${yy}`))n++}
+ return n}
+async function docRead(){const out=document.getElementById('docOut'),fi=document.getElementById('docFiles');if(!out||!fi)return;const files=[...fi.files];
+ if(!files.length){out.style.color='#B45309';out.textContent=L('Choose the files first','اختار الملفات الأول');return}
+ if(!onlineOn()){out.style.color='#B91C1C';out.textContent=L('This needs the online server connection','الميزة دي محتاجة اتصال بالسيرفر');return}
+ out.style.color='#475569';out.textContent='⏳ '+L('Reading the documents…','جاري قراءة المستندات…');
+ try{const images=[];for(const f of files.slice(0,8))images.push(await docPrep(f));
+  const r=await onCall({action:'extract',images},120000),n=docFill(r.fields||{});
+  out.style.color=n?'#047857':'#B45309';out.textContent=n?'✅ '+L(`${n} fields filled — review them before saving`,`اتعبّى ${n} حقل — راجعهم قبل الحفظ`):L('Nothing new to fill (fields already have values, or nothing readable)','مفيش حاجة جديدة تتعبّى (الحقول فيها بيانات أو المستند مش مقروء)')}
+ catch(e){out.style.color='#B91C1C';out.textContent='❌ '+e.message}}
 function empForm(e){const isEdit=!!e;e=Object.assign({},EMP_DEF,e||{emp_id:nextEmpId(),hire_date:todayS()});e._edit=isEdit;e.emp_class=empClass(e);S.tmp.photo=e.employee_photo||'';S.tmp.lastAr=e.arabic_name||'';
  const secs=EMP_SECTIONS();const tab=S.tmp.empTab||'basic';
  S.tmp.after=()=>empTab(tab);
  return head(isEdit?'✏️':'👤',isEdit?L('Edit Employee','تعديل موظف')+': '+esc(e.name):L('Add New Employee','إضافة موظف جديد'),isEdit?L('Update employee information','تحديث بيانات الموظف'):L('Add new employee information to the system','إضافة بيانات موظف جديد'),'#6366F1',btn('← '+L('Back','رجوع'),"go('employees')",'ghost'))
- +`<div class="wrap"><form id="frm" onsubmit="return false"><div class="tabs">${secs.map(s=>`<button type="button" data-tab="${s[0]}" onclick="empTab('${s[0]}')">${s[1]} ${s[2]}</button>`).join('')}</div>
+ +`<div class="wrap"><form id="frm" onsubmit="return false">${docCard()}<div class="tabs">${secs.map(s=>`<button type="button" data-tab="${s[0]}" onclick="empTab('${s[0]}')">${s[1]} ${s[2]}</button>`).join('')}</div>
  ${secs.map(s=>`<div class="card etab" data-sec="${s[0]}"><h3>${s[1]} ${s[2]}</h3>${s[0]==='basic'?`<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px"><div class="photo" id="ph">${S.tmp.photo?`<img src="${S.tmp.photo}">`:'👤<br>'+L('Employee Photo','صورة الموظف')}</div><div style="display:flex;flex-direction:column;gap:8px;justify-content:center"><label class="btn b sm" style="cursor:pointer">📷 ${L('Upload','رفع')}<input type="file" accept="image/*" capture="user" hidden onchange="photoUp(this)"></label>${btn('📸 '+L('Camera','كاميرا'),'photoCam()','b sm')}${btn('🔄 '+L('Rotate','تدوير'),'photoRot()','y sm')}${btn('🗑️ '+L('Remove','حذف'),'photoDel()','r sm')}<div class="muted">${L('Age','العمر')}: <b>${ageOf(e.birth_date)||'—'}</b></div></div></div>`:''}<div class="grid">${s[3].map(f=>empField(f,e)).join('')}</div></div>`).join('')}
  <div class="actions">${btn('💾 '+(isEdit?L('Update Employee','تحديث الموظف'):L('Save Employee','حفظ الموظف')),`saveEmp(${isEdit?q(e.emp_id):"''"})`,'g')}${isEdit?btn('🖨️ '+L('Print Profile','طباعة الملف'),`printEmp(${q(e.emp_id)})`,'b'):''}${btn('❌ '+L('Cancel','إلغاء'),"go('employees')",'r')}</div></form></div>`}
 function empTab(t){S.tmp.empTab=t;$$('.etab').forEach(d=>d.style.display=d.dataset.sec===t?'':'none');$$('.tabs button[data-tab]').forEach(b=>b.classList.toggle('on',b.dataset.tab===t));
@@ -1106,9 +1142,14 @@ async function attImport(){const fi=$('#attF').files[0];if(!fi){notify(L('Choose
   let hi=rows.findIndex(r=>r.some(c=>/(emp|id|code|كود|رقم)/i.test(String(c))&&isNaN(+c)));const hdr=hi>=0?rows[hi].map(c=>String(c).toLowerCase()):[];
   const ci=re=>hdr.findIndex(h=>re.test(h));const cId=ci(/emp|^id$|user|code|كود|رقم/),cDT=ci(/date.?time|التاريخ والوقت|timestamp/),cD=ci(/^date$|التاريخ|day/),cT=ci(/^time$|الوقت/),cIn=ci(/check.?in|in$|دخول/),cOut=ci(/check.?out|out$|خروج/);
   const body=hi>=0?rows.slice(hi+1):rows;
+  const _dsamples=body.map(r=>{if(!r||!r.length)return'';
+   if(hi<0||cDT>=0||(cD<0&&cT<0))return String(r[hi<0?1:cDT]??'');
+   return String(r[cD]??'')});
+  withDateFormat_(_dsamples,()=>{
   body.forEach(r=>{if(!r||!r.length)return;
    if(hi<0||cDT>=0||(cD<0&&cT<0)){const id=String(r[hi<0?0:cId]??'').trim();let dt=String(r[hi<0?1:cDT]??'').trim();if(hi<0&&r[2]&&/^\d{1,2}:\d{2}/.test(r[2])&&!/\d:\d/.test(dt))dt+=' '+r[2];const m=dt.match(/^(\S+)[ T](\d{1,2}:\d{2}(:\d{2})?)/);if(m)add(id,parseD(m[1]),to24(m[2]));return}
-   const id=String(r[cId]??'').trim(),d=parseD(r[cD]);if(cIn>=0||cOut>=0){if(cIn>=0&&r[cIn])add(id,d,to24(r[cIn]));if(cOut>=0&&r[cOut])add(id,d,to24(r[cOut]))}else if(cT>=0)add(id,d,to24(r[cT]))});
+   const id=String(r[cId]??'').trim(),d=parseD(r[cD]);if(cIn>=0||cOut>=0){if(cIn>=0&&r[cIn])add(id,d,to24(r[cIn]));if(cOut>=0&&r[cOut])add(id,d,to24(r[cOut]))}else if(cT>=0)add(id,d,to24(r[cT]))})
+  });
   let created=0,updated=0,refunded=0;
   for(const k in punches){const [id,ds]=k.split('|');const ts=punches[k].filter(t=>timeMin(t)!=null).sort((a,b)=>timeMin(a)-timeMin(b));if(!ts.length)continue;const cin=ts[0],cout=ts.length>1?ts[ts.length-1]:'';
    let a=DB.attendance.find(x=>String(x.emp_id)===id&&fmtD(x.date)===ds);
@@ -1472,16 +1513,32 @@ function setPassword(){return `<form id="frm" class="card" onsubmit="return fals
 function changePw(){if(typeof onlineOn==='function'&&onlineOn()){srvChangePw();return}const f=document.getElementById('pwf')||F();if(!pwOk(userPw(S.user),fv(f,'cur'))){notify(L('Current password is incorrect','كلمة المرور الحالية غير صحيحة'),'err');return}const n=fv(f,'np');if(n.length<8){notify(L('Password must be at least 8 characters','كلمة المرور 8 أحرف على الأقل'),'err');return}if(n!==fv(f,'np2')){notify(L('Passwords do not match','كلمتا المرور غير متطابقتين'),'err');return}
  DB.user_passwords[S.user]=pwHash(n);if(DB.custom_users[S.user])DB.custom_users[S.user].password=DB.user_passwords[S.user];if(typeof sessSave==='function')sessSave(S.user,S.role);log('Change password',S.user,'security');saveDB();notify(L('Password changed','تم تغيير كلمة المرور'));render()}
 function setUsers(){const all=allUsers();return `<div class="card"><h3>👥 ${L('Users Management','إدارة المستخدمين')}</h3><div style="margin-bottom:10px">${btn('➕ '+L('Add User','إضافة مستخدم'),"go('settings/users/new')",'g')}</div>
- ${table([L('Username','اسم المستخدم'),L('Role','الصلاحية'),L('Status','الحالة'),L('Type','النوع'),L('Pages','الصفحات'),L('Actions','إجراءات')],Object.entries(all).map(([u,r])=>{const dis=DB.disabled_users.includes(u);return {c:[esc(u),esc(L(...(ROLES[r.role]||[r.role,r.role]))),badge(dis?L('Stopped','موقوف'):L('Active','نشط'),dis?'bad':'ok'),r.custom?L('Custom','مضاف'):L('Built-in','أساسي'),DB.user_permissions[u]?DB.user_permissions[u].length:L('Role default','افتراضي'),`<div class="acts">${btn('✏️','go('+q('settings/users/'+encodeURIComponent(u))+')','sm b')}${u!=='admin'&&u!==S.user?btn(dis?'🟢':'⛔',`toggleUser(${q(u)})`,'sm '+(dis?'g':'d')):''}${r.custom&&u!==S.user?dbtn('🗑️',`delete DB.custom_users[${q(u)}];delete DB.user_permissions[${q(u)}];saveDB();render()`,'sm r'):''}</div>`]}}),{id:'tusr'})}</div>`}
+ ${table([L('Username','اسم المستخدم'),L('Role','الصلاحية'),L('Status','الحالة'),L('Type','النوع'),L('Pages','الصفحات'),L('Actions','إجراءات')],Object.entries(all).map(([u,r])=>{const dis=DB.disabled_users.includes(u);return {c:[esc(u),esc(L(...(ROLES[r.role]||[r.role,r.role]))),badge(dis?L('Stopped','موقوف'):L('Active','نشط'),dis?'bad':'ok'),r.custom?L('Custom','مضاف'):L('Built-in','أساسي'),DB.user_permissions[u]?DB.user_permissions[u].length:L('Role default','افتراضي'),`<div class="acts">${btn('✏️','go('+q('settings/users/'+encodeURIComponent(u))+')','sm b')}${(u!=='admin'||dis)&&u!==S.user?btn(dis?'🟢':'⛔',`toggleUser(${q(u)})`,'sm '+(dis?'g':'d')):''}${r.custom&&u!==S.user?dbtn('🗑️',`delete DB.custom_users[${q(u)}];delete DB.user_permissions[${q(u)}];saveDB();render()`,'sm r'):''}</div>`]}}),{id:'tusr'})}</div>`}
 function toggleUser(u){const i=DB.disabled_users.indexOf(u);if(i>=0)DB.disabled_users.splice(i,1);else DB.disabled_users.push(u);log(i>=0?'Enable user':'Disable user',u,'security');saveDB();render()}
 function userForm(u){const all=allUsers();const r=u?all[u]:null;if(u&&!r)return '';const perms=u&&DB.user_permissions[u]?DB.user_permissions[u]:roleDefault(r?r.role:'leaves_eval');
- return `<form id="frm" class="card" onsubmit="return false"><h3>${u?'✏️ '+esc(u):'➕ '+L('Add User','إضافة مستخدم')}</h3><div class="grid">${fld(L('Username','اسم المستخدم'),inp('un',u||'','text',u?'readonly':''),0,1)}${fld(L('Password','كلمة المرور')+(u?' ('+L('leave empty to keep','اتركها فارغة للإبقاء')+')':''),inp('pw','','text'),0,!u)}${fld(L('Role','الصلاحية'),sel('role',Object.keys(ROLES).map(k=>[k,L(...ROLES[k])]),r?r.role:'leaves_eval','',r&&!r.custom?'disabled':''))}</div>
+ return `<form id="frm" class="card" onsubmit="return false"><h3>${u?'✏️ '+esc(u):'➕ '+L('Add User','إضافة مستخدم')}</h3><div class="grid">${fld(L('Username','اسم المستخدم'),inp('un',u||'','text',''),0,1)}${fld(L('Password','كلمة المرور')+(u?' ('+L('leave empty to keep','اتركها فارغة للإبقاء')+')':''),inp('pw','','text'),0,!u)}${fld(L('Role','الصلاحية'),sel('role',Object.keys(ROLES).map(k=>[k,L(...ROLES[k])]),r?r.role:'leaves_eval','',''))}</div>
  <div class="sec mt">🔑 ${L('Allowed pages','الصفحات المسموحة')}</div><div style="display:flex;flex-wrap:wrap;gap:4px 18px">${NAV.map(n=>`<label class="chk"><input type="checkbox" class="pchk" value="${n[0]}" ${perms.includes(n[0])?'checked':''}> ${n[1]} ${L(n[2],n[3])}</label>`).join('')}</div>
  <div class="actions">${btn('💾 '+L('Save','حفظ'),`saveUser(${u?q(u):"''"})`,'g')}${u?btn('↺ '+L('Reset to role default','إرجاع للافتراضي'),`delete DB.user_permissions[${q(u)}];saveDB();render()`,'y'):''}${btn('❌ '+L('Cancel','إلغاء'),"go('settings/users')",'r')}</div></form>`}
-function saveUser(old){const f=F();const u=fv(f,'un'),pw=fv(f,'pw'),role=fv(f,'role');if(!u){notify(L('Username required','اسم المستخدم مطلوب'),'err');return}const all=allUsers();
- if(pw&&pw.length<8){notify(L('Password must be at least 8 characters','كلمة المرور 8 أحرف على الأقل'),'err');return}if(!old){if(all[u]){notify(L('User already exists','المستخدم موجود'),'err');return}if(!pw){notify(L('Password required','كلمة المرور مطلوبة'),'err');return}DB.custom_users[u]={password:pwHash(pw),role}}
- else{if(pw)DB.user_passwords[u]=pwHash(pw);if(DB.custom_users[u]){DB.custom_users[u].role=role;if(pw)DB.custom_users[u].password=DB.user_passwords[u]}}if(u===S.user&&typeof sessSave==='function')sessSave(S.user,S.role);
- DB.user_permissions[u]=$$('.pchk').filter(c=>c.checked).map(c=>c.value);log(old?'Edit user':'Add user',u,'security');saveDB();setFlash(L('User saved','تم حفظ المستخدم'));go('settings/users')}
+function saveUser(old){const f=F();const u=fv(f,'un').trim(),pw=fv(f,'pw'),role=fv(f,'role');if(!u){notify(L('Username required','اسم المستخدم مطلوب'),'err');return}const all=allUsers();
+ if(pw&&pw.length<8){notify(L('Password must be at least 8 characters','كلمة المرور 8 أحرف على الأقل'),'err');return}
+ const onl=typeof onlineOn==='function'&&onlineOn(),renamed=!!old&&u!==old;
+ if((!old||renamed)&&Object.keys(all).some(k=>k.toLowerCase()===u.toLowerCase()&&k!==old)){notify(L('User already exists','المستخدم موجود'),'err');return}
+ if(!old&&!pw){notify(L('Password required','كلمة المرور مطلوبة'),'err');return}
+ if(old&&all[old]&&all[old].role==='admin'&&role!=='admin'){
+  if(old===S.user){notify(L('You cannot remove your own administrator role','مينفعش تشيل صلاحية المدير من نفسك'),'err');return}
+  if(!Object.keys(all).some(k=>k!==old&&all[k].role==='admin'&&!DB.disabled_users.includes(k))){notify(L('At least one active administrator must remain','لازم يفضل مدير نظام واحد على الأقل'),'err');return}}
+ const perms=$$('.pchk').filter(c=>c.checked).map(c=>c.value);
+ if(!old){DB.custom_users[u]={password:pwHash(pw),role}}
+ else if(!renamed){if(pw){const h=pwHash(pw);DB.user_passwords[u]=h;if(DB.custom_users[u])DB.custom_users[u].password=h}
+  if(DB.custom_users[u])DB.custom_users[u].role=role;else if(all[u]&&all[u].role!==role)DB.custom_users[u]={role}}
+ else{const rec={role};if(onl)rec.rename_from=old;else{const cur=DB.user_passwords[old]||(all[old]&&all[old].pw);if(cur)rec.password=cur}
+  if(pw){rec.password=pwHash(pw);DB.user_passwords[u]=rec.password}
+  DB.custom_users[u]=rec;delete DB.custom_users[old];delete DB.user_passwords[old];delete DB.user_permissions[old];
+  const di=DB.disabled_users.indexOf(old);if(di>=0){DB.disabled_users.splice(di,1);DB.disabled_users.push(u)}else if(DEFAULT_USERS[old])DB.disabled_users.push(old)}
+ DB.user_permissions[u]=perms;log(old?(renamed?'Rename user':'Edit user'):'Add user',renamed?old+' → '+u:u,'security');saveDB();
+ if(renamed&&old===S.user){setFlash(L('Username changed — sign in with the new name','تم تغيير اسم المستخدم — سجّل الدخول بالاسم الجديد'));logout();return}
+ if(u===S.user&&typeof sessSave==='function')sessSave(S.user,S.role);
+ setFlash(L('User saved','تم حفظ المستخدم'));go('settings/users')}
 function setData(){const sz=(JSON.stringify(DB).length/1048576).toFixed(2);return `<div class="card"><h3>💾 ${L('Backup Data','نسخ احتياطي')}</h3><p class="muted">${L('Database size','حجم البيانات')}: ${sz} MB — ${Object.keys(DB.employees).length} ${L('employees','موظف')}, ${DB.attendance.length} ${L('attendance rows','سجل حضور')}</p>${btn('💾 '+L('Backup Now (JSON)','نسخ احتياطي الآن (JSON)'),'backupNow()','g')} ${btn('📥 '+L('Backup to Excel','نسخ احتياطي Excel'),'backupXlsx()','d')}<p class="muted" style="margin-top:8px">${L('The Excel file has the same layout as the desktop HR_Backup (no passwords). To restore, choose the same file below under Restore.','ملف Excel بنفس تنسيق HR_Backup بتاع الديسكتوب (بدون كلمات مرور). للاسترجاع اختار نفس الملف من «استرجاع» تحت.')}</p></div>
  <div class="card"><h3>📂 ${L('Restore / Import from desktop v65 (JSON or Excel backup)','استرجاع / استيراد من نسخة الديسكتوب v65 (نسخة JSON أو Excel)')}</h3><p class="muted">${L('Choose a backup JSON from this web app, or the hr_data.json file of the Python desktop program — all employees, attendance, leaves, payroll, advances, penalties, CL staff, evaluations, renewals, change of status, archive and users are imported.','اختر نسخة JSON من هذا البرنامج أو ملف hr_data.json من برنامج الديسكتوب (بايثون) — يتم استيراد كل الموظفين والحضور والإجازات والمرتبات والسلف والجزاءات وخصم العاملين والتقييمات والتجديدات وتغيير الحالة والأرشيف والمستخدمين.')}</p>
  <input type="file" id="rsF" accept=".json,.xlsx,.xls,application/json"> <label class="chk"><input type="checkbox" id="rsM"> ${L('Merge into current data instead of replacing','دمج مع البيانات الحالية بدلاً من الاستبدال')}</label>${dbtn('📂 '+L('Restore','استرجاع'),'restoreNow()','b')}</div>
@@ -1549,7 +1606,12 @@ async function empImport(){const fi=$('#impF').files[0];if(!fi){notify(L('Choose
   let R;if(full){R=importBackupBook(book,false)}
   else{const aoa=book.sheets['employees']||book.sheets[book.names[0].trim().toLowerCase()];const objs=sheetObjs(aoa);let a=0,u=0,skip=0;const errs=[];
    if(objs.length&&!Object.keys(objs[0]).some(k=>['first name','name','full name','employee name','الاسم'].includes(k))){box.innerHTML=`<div class="flash err">⚠ ${L('No name column found. The first row must contain headers such as "Emp ID" and "Name" (or "First Name"). Found:','لم يتم العثور على عمود الاسم. يجب أن يحتوي الصف الأول على عناوين مثل "Emp ID" و "Name" أو "First Name". الموجود:')} ${esc(Object.keys(objs[0]).slice(0,12).join(', '))}</div>`;return}
-   objs.forEach((o,i)=>{const id=g(o,'emp id','emp_id','employee id','id','code','كود');const nm=g(o,'first name','name','full name','employee name','الاسم');if(!id||!nm){skip++;return}const ex=DB.employees[id];if(ex&&!upd){skip++;errs.push(`${L('Row','صف')} ${i+2}: ${id} ${L('exists','موجود')}`);return}DB.employees[id]=empFromRow(o,ex);DB.employees[id].emp_id=id;ex?u++:a++});
+   /* scan every date-like column across the whole file first, so "5/3/2025" is read the same way (day-first or month-first) for every row and every employee — guessing file format row by row is how a birth date like 3 May ends up stored as 5 March */
+   const _dateKeys=EMP_XL.filter(([k])=>/date|_issue$|_expiry$|_renewal$/.test(k)&&!/_area$|_number$/.test(k));
+   const _dsamples=[];objs.forEach(o=>_dateKeys.forEach(([k,h])=>{const v=g(o,h,k,...(XL_ALIAS[k]||[]));if(v)_dsamples.push(v)}));
+   withDateFormat_(_dsamples,()=>{
+   objs.forEach((o,i)=>{const id=g(o,'emp id','emp_id','employee id','id','code','كود');const nm=g(o,'first name','name','full name','employee name','الاسم');if(!id||!nm){skip++;return}const ex=DB.employees[id];if(ex&&!upd){skip++;errs.push(`${L('Row','صف')} ${i+2}: ${id} ${L('exists','موجود')}`);return}DB.employees[id]=empFromRow(o,ex);DB.employees[id].emp_id=id;ex?u++:a++})
+   });
    R={_added:a,_updated:u,_skip:skip,errs}}
   log('Import Excel',`${esc(fi.name)}: ${JSON.stringify(R).slice(0,300)}`,'employee');saveDB();
   box.innerHTML=full?`<div class="flash ok">✅ ${L('Full desktop backup imported','تم استيراد النسخة الاحتياطية الكاملة')} — ${importSummary(R)}</div>`
@@ -2126,7 +2188,7 @@ function asMonthCodes(y,m,emps){const {ps,pe,days}=asPeriod(y,m),ids=new Set(emp
  const out={};for(const e of emps){const id=String(e.emp_id);out[id]=days.map(d=>{const k=id+'|'+asDayKey(d);return att[k]==='P'?'P':(lv[k]||att[k]||'')})}return out}
 const _asMemo={};
 function asCodesFor(y,m,e){const sig=DB.attendance.length+'|'+DB.leaves.length+'|'+Object.keys(DB.employees).length+'|'+(S.rendered||'');const k=y+'-'+m;let c=_asMemo[k];
- if(!c||c.sig!==sig){c=_asMemo[k]={sig,map:asMonthCodes(y,m,Object.values(DB.employees))}}return c.map[String(e.emp_id)]||asMonthCodes(y,m,[e])[String(e.emp_id)]}
+ if(!c||c.sig!==sig){c=_asMemo[k]={sig,map:asMonthCodes(y,m,Object.values(DB.employees))}}return asO2V(c.map[String(e.emp_id)]||asMonthCodes(y,m,[e])[String(e.emp_id)])}
 function asCount(row,c){return row.filter(x=>x===c).length}
 /* opening balance: typed by hand, else last month's NB, else the current leave balance at the start of the month */
 function asOB(e,y,m,depth){depth=depth||0;const st=(DB.att_sheet||{})[asKey(y,m)]||{};const r=st[e.emp_id];if(r&&r.ob!=null&&r.ob!=='')return num(r.ob);
@@ -2139,16 +2201,19 @@ function asFreeze(y,m,emps){const [cm,cy]=curPeriod();if(y!==cy||m!==cm)return;c
 function asSet(id,field,v,y,m){const st=asStore(y,m);const r=st[id]||(st[id]={});r[field]=v===''?null:num(v);if(field==='ob'&&v==='')delete r.ob;log('Attendance sheet',`${asKey(y,m)} ${id} ${field}=${v}`,'attendance');saveDB();render()}
 /* heads of departments = the managers chosen in Departments (manager_id) */
 function asHeadMap(){const h={};Object.values(DB.departments||{}).forEach(d=>{const id=String(d.manager_id||'').trim();if(id&&getEmp(id))(h[id]=h[id]||[]).push(tv(d.name))});return h}
+/* two or more Day-Off (O) days in a row → every day of that run becomes Vacation (V) */
+function asO2V(c){if(!Array.isArray(c))return c;const r=c.slice();let i=0;while(i<r.length){if(r[i]==='O'){let j=i;while(j<r.length&&r[j]==='O')j++;if(j-i>=2)for(let k=i;k<j;k++)r[k]='V';i=j}else i++}return r}
 function asData(y,m){const heads=S.tmp.asMode==='heads'?asHeadMap():null;const dep=S.tmp.asDep||'';
  const dn=e=>heads?'Head Department':String(tv(empDept(e))||'—');const hdOf=e=>heads?(heads[String(e.emp_id)]||[]).join(' + '):'';
  let emps=activeEmps().filter(e=>(!heads||heads[String(e.emp_id)])&&(!dep||String(e.department)===dep||(heads&&Object.values(DB.departments).some(d=>String(d.dept_id)===dep&&String(d.manager_id)===String(e.emp_id))))).sort((a,b)=>dn(a).localeCompare(dn(b))||hdOf(a).localeCompare(hdOf(b))||String(a.emp_id).localeCompare(String(b.emp_id),undefined,{numeric:true}));
  asFreeze(y,m,emps);const codes=asMonthCodes(y,m,emps),st=(DB.att_sheet||{})[asKey(y,m)]||{};
- const rows=emps.map(e=>{const c=codes[String(e.emp_id)],ob=asOB(e,y,m),cr=num((st[e.emp_id]||{}).cr),cnt={};AS_CODES.forEach(k=>cnt[k]=asCount(c,k));const cb=r2(ob-cnt.V-cnt.O);return {e,hd:hdOf(e),dep:dn(e),c,ob,cb,cr,nb:r2(cb+cr),cnt}});
+ const rows=emps.map(e=>{const c=asO2V(codes[String(e.emp_id)]),ob=asOB(e,y,m),cr=num((st[e.emp_id]||{}).cr),cnt={};AS_CODES.forEach(k=>cnt[k]=asCount(c,k));const cb=r2(ob-cnt.V-cnt.O);return {e,hd:hdOf(e),dep:dn(e),c,ob,cb,cr,nb:r2(cb+cr),cnt}});
  return {emps,rows,last:asPeriod(y,m).days.length}}
 /* rows → departments (each department its own block, numbered from 1, with its own Total present) */
 const AS_HW='#FFFFFF',AS_HG='#F2F2F2',AS_HC='#CCFFCC';
+const asHx=()=>S.tmp.asMode==='heads'?1:0;
 function asHead(last,web){const th=(t,bg,cls)=>`<th${cls?` class="${cls}"`:''} style="background:${bg};color:#000;border:1px solid #000">${t}</th>`;
- return `<tr>${th('NO',AS_HW)}${th('CL.NO',AS_HW)}${th('NAME',AS_HW,web?'asnm':'')}${th('OB',AS_HG)}${asPeriod(S.tmp._asY,S.tmp._asM).days.map(dd=>{const h=typeof phOn==='function'?phOn(dd):null;const n=dd.getDate();return h?th(`<span title="${esc(phName(h))}">${n}</span>`,'#92D050'):th(`<span title="${dmy(dd)}">${n}</span>`,AS_HW)}).join('')}${th('CB',AS_HG)}${th('CR',AS_HG)}${th('NB',AS_HG)}${AS_CODES.map(k=>th(k,AS_HC)).join('')}</tr>`}
+ return `<tr>${th('NO',AS_HW)}${th('CL.NO',AS_HW)}${th('NAME',AS_HW,web?'asnm':'')}${asHx()?th('DEPARTMENT',AS_HW,web?'asnm':''):''}${th('OB',AS_HG)}${asPeriod(S.tmp._asY,S.tmp._asM).days.map(dd=>{const h=typeof phOn==='function'?phOn(dd):null;const n=dd.getDate();return h?th(`<span title="${esc(phName(h))}">${n}</span>`,'#92D050'):th(`<span title="${dmy(dd)}">${n}</span>`,AS_HW)}).join('')}${th('CB',AS_HG)}${th('CR',AS_HG)}${th('NB',AS_HG)}${AS_CODES.map(k=>th(k,AS_HC)).join('')}</tr>`}
 function asGroups(y,m){S.tmp._asY=y;S.tmp._asM=m;const {rows,last}=asData(y,m);const q=String(S.srch.tas||'').trim().toLowerCase();const qx=q&&/^\d+$/.test(q)&&rows.some(r=>_nz(r.e.emp_id)===_nz(q));const vis=q?rows.filter(r=>qx?_nz(r.e.emp_id)===_nz(q):(r.e.emp_id+' '+r.e.name+' '+(r.e.arabic_name||'')).toLowerCase().includes(q)):rows;
  const g=[];vis.forEach(r=>{let x=g[g.length-1];if(!x||x.dep!==r.dep){x={dep:r.dep,rows:[]};g.push(x)}r.n=x.rows.length+1;x.rows.push(r)});
  g.forEach(x=>{x.tot=[];for(let d=0;d<last;d++)x.tot.push(x.rows.filter(r=>r.c[d]==='P').length);x.sums={};AS_CODES.forEach(k=>x.sums[k]=x.rows.reduce((s,r)=>s+r.cnt[k],0))});
@@ -2162,11 +2227,11 @@ ROUTES.attsheet=(per,mode)=>{S.tmp.asMode=mode==='heads'?'heads':'';const MS=mod
  const pm=m===1?`${y-1}-12`:`${y}-${pad(m-1)}`,nm=m===12?`${y+1}-01`:`${y}-${pad(m+1)}`;
  const inp=(id,f,v)=>`<input class="asin" type="number" step="any" title="${esc(L('Click to edit','اضغط للتعديل'))}" value="${v==null?'':v}" onchange="asSet('${esc(id)}','${f}',this.value,${y},${m})">`;
  const H=asHead(last,true);
- const body=groups.map(g=>`<tr class="asdep"><td colspan="${last+14}">🏢 ${esc(g.dep)} <span>(${g.rows.length})</span></td></tr>`+H+g.rows.map(r=>`<tr><td>${r.n}</td><td><b>${esc(r.e.emp_id)}</b></td><td class="asnm">${esc(r.e.name)}${r.hd?` <small class="muted">— ${esc(r.hd)}</small>`:''}</td><td class="asob">${inp(r.e.emp_id,'ob',asI(r.ob))}</td>${r.c.map(cellR(r)).join('')}<td class="asb"><b>${asI(r.cb)}</b></td><td class="asob"${r.crAuto?` title="${esc(L('Official holidays worked','أيام شغل في إجازات رسمية')+': +'+r.crAuto+(r.crMan?' · '+L('manual','يدوي')+': '+r.crMan:''))}"`:''}>${r.crAuto?`<div style="display:flex;align-items:center;justify-content:center;gap:2px">${inp(r.e.emp_id,'cr',asI(r.crMan)||'')}<small style="color:#059669;font-weight:800;white-space:nowrap">+${r.crAuto}</small></div>`:inp(r.e.emp_id,'cr',asI(r.cr)||'')}</td><td class="asb"><b>${asI(r.nb)}</b></td>${AS_CODES.map(k=>`<td>${r.cnt[k]}</td>`).join('')}</tr>`).join('')
-  +`<tr class="astot"><td colspan="4">Total present</td>${g.tot.map(n=>`<td>${n}</td>`).join('')}<td colspan="3"></td>${AS_CODES.map(k=>`<td>${g.sums[k]}</td>`).join('')}</tr>`).join('')
-  ||`<tr><td colspan="${last+14}" class="empty">${mode==='heads'?L('No department managers chosen yet — open Departments, edit each department and choose its Manager.','مفيش مدير قسم متحدد لسه — افتح الأقسام، وعدّل كل قسم واختار المدير بتاعه.'):L('No records found','لا توجد سجلات')}</td></tr>`;
+ const body=groups.map(g=>`<tr class="asdep"><td colspan="${last+14+asHx()}">🏢 ${esc(g.dep)} <span>(${g.rows.length})</span></td></tr>`+H+g.rows.map(r=>`<tr><td>${r.n}</td><td><b>${esc(r.e.emp_id)}</b></td><td class="asnm">${esc(r.e.name)}</td>${asHx()?`<td class="asnm">${esc(r.hd||'')}</td>`:''}<td class="asob">${inp(r.e.emp_id,'ob',asI(r.ob))}</td>${r.c.map(cellR(r)).join('')}<td class="asb"><b>${asI(r.cb)}</b></td><td class="asob"${r.crAuto?` title="${esc(L('Official holidays worked','أيام شغل في إجازات رسمية')+': +'+r.crAuto+(r.crMan?' · '+L('manual','يدوي')+': '+r.crMan:''))}"`:''}>${r.crAuto?`<div style="display:flex;align-items:center;justify-content:center;gap:2px">${inp(r.e.emp_id,'cr',asI(r.crMan)||'')}<small style="color:#059669;font-weight:800;white-space:nowrap">+${r.crAuto}</small></div>`:inp(r.e.emp_id,'cr',asI(r.cr)||'')}</td><td class="asb"><b>${asI(r.nb)}</b></td>${AS_CODES.map(k=>`<td>${r.cnt[k]}</td>`).join('')}</tr>`).join('')
+  +`<tr class="astot"><td colspan="${4+asHx()}">Total present</td>${g.tot.map(n=>`<td>${n}</td>`).join('')}<td colspan="3"></td>${AS_CODES.map(k=>`<td>${g.sums[k]}</td>`).join('')}</tr>`).join('')
+  ||`<tr><td colspan="${last+14+asHx()}" class="empty">${mode==='heads'?L('No department managers chosen yet — open Departments, edit each department and choose its Manager.','مفيش مدير قسم متحدد لسه — افتح الأقسام، وعدّل كل قسم واختار المدير بتاعه.'):L('No records found','لا توجد سجلات')}</td></tr>`;
  const gt=[];for(let d=0;d<last;d++)gt.push(all.filter(r=>r.c[d]==='P').length);
- const grand=groups.length>1?`<tr class="astot asgrand"><td colspan="4">${L('GRAND TOTAL — all departments','الإجمالي — كل الأقسام')}</td>${gt.map(n=>`<td>${n}</td>`).join('')}<td colspan="3"></td>${AS_CODES.map(k=>`<td>${all.reduce((s,r)=>s+r.cnt[k],0)}</td>`).join('')}</tr>`:'';
+ const grand=groups.length>1?`<tr class="astot asgrand"><td colspan="${4+asHx()}">${L('GRAND TOTAL — all departments','الإجمالي — كل الأقسام')}</td>${gt.map(n=>`<td>${n}</td>`).join('')}<td colspan="3"></td>${AS_CODES.map(k=>`<td>${all.reduce((s,r)=>s+r.cnt[k],0)}</td>`).join('')}</tr>`:'';
  return head(mode==='heads'?'👔':'🗓️',(mode==='heads'?'Head Department Attendance':L('Monthly Attendance Report','التقرير الشهري للحضور والانصراف'))+' — '+monthName(m)+' '+y+'  ('+dmy(PB[0])+' → '+dmy(PB[1])+')',L('Payroll cycle 25 → 24 · OB = opening balance · CB = OB − V − O · CR = credit · NB = CB + CR (becomes next month’s OB)','دورة المرتبات 25 ← 24 · OB رصيد الافتتاح · CB = OB − V − O · CR إضافة · NB = CB + CR (بيترحّل افتتاح الشهر الجاي)'),'#1E3A5F',
   btn('← '+L('Reports','التقارير'),"go('reports')",'ghost')+btn('◀ '+L('Previous','السابق'),`go('attsheet/${pm}${MS}')`,'ghost')+btn(L('Next','التالي')+' ▶',`go('attsheet/${nm}${MS}')`,'ghost')+btn('🖨️ '+L('Print','طباعة'),`asPrint(${y},${m})`,'ghost')+btn('📊 Excel',`asExcel(${y},${m})`,'ghost'))
  +`<div class="wrap"><div class="filters"><div class="fld"><label>${L('Payroll month','شهر المرتبات')}</label><input type="month" value="${y}-${pad(m)}" onchange="if(this.value)go('attsheet/'+this.value+'${MS}')"></div>
@@ -2178,38 +2243,50 @@ function asPrint(y,m){const {groups,last}=asGroups(y,m);
  const c=x=>{const k=AS_COLOR[x];return `<td${k?` style="background:${k[0]};color:${k[1]}"`:''}>${x||''}</td>`};
  const H=asHead(last,false);
  printRaw(`<style>@media print{@page{size:A4 landscape;margin:6mm}}.asp{font-family:Calibri,Arial,sans-serif;direction:ltr}.asp h2{margin:0 0 6px;font-size:15px;text-align:center}.asp table{border-collapse:collapse;width:100%}.asp th,.asp td{border:1px solid #333;padding:1px 2px;text-align:center;font-size:9px;-webkit-print-color-adjust:exact;print-color-adjust:exact}.asp th{background:#fff;font-weight:700}.asp .nm{text-align:left;white-space:nowrap}.asp .tot td{background:#FFFF00;font-weight:700}.asp .dep td{background:#1E3A5F;color:#fff;font-weight:700;text-align:left;font-size:10px}</style>
- <div class="asp"><h2>${esc(DB.settings.company||'')} — ${S.tmp.asMode==='heads'?'Head Department Attendance':L('Attendance','الحضور')} ${monthName(m)} ${y}</h2><table><tbody>${groups.map(g=>`<tr class="dep"><td colspan="${last+14}">${esc(g.dep)}</td></tr>${H}
- ${g.rows.map(r=>`<tr><td>${r.n}</td><td><b>${esc(r.e.emp_id)}</b></td><td class="nm">${esc(r.e.name)}${r.hd?' — '+esc(r.hd):''}</td><td>${asI(r.ob)}</td>${r.c.map(c).join('')}<td><b>${asI(r.cb)}</b></td><td>${asI(r.cr)||''}</td><td><b>${asI(r.nb)}</b></td>${AS_CODES.map(k=>`<td>${r.cnt[k]}</td>`).join('')}</tr>`).join('')}
- <tr class="tot"><td colspan="4">Total present</td>${g.tot.map(n=>`<td>${n}</td>`).join('')}<td colspan="3"></td>${AS_CODES.map(k=>`<td>${g.sums[k]}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`,'ltr')}
+ <div class="asp"><h2>${esc(DB.settings.company||'')} — ${S.tmp.asMode==='heads'?'Head Department Attendance':L('Attendance','الحضور')} ${monthName(m)} ${y}</h2><table><tbody>${groups.map(g=>`<tr class="dep"><td colspan="${last+14+asHx()}">${esc(g.dep)}</td></tr>${H}
+ ${g.rows.map(r=>`<tr><td>${r.n}</td><td><b>${esc(r.e.emp_id)}</b></td><td class="nm">${esc(r.e.name)}</td>${asHx()?`<td class="nm">${esc(r.hd||'')}</td>`:''}<td>${asI(r.ob)}</td>${r.c.map(c).join('')}<td><b>${asI(r.cb)}</b></td><td>${asI(r.cr)||''}</td><td><b>${asI(r.nb)}</b></td>${AS_CODES.map(k=>`<td>${r.cnt[k]}</td>`).join('')}</tr>`).join('')}
+ <tr class="tot"><td colspan="${4+asHx()}">Total present</td>${g.tot.map(n=>`<td>${n}</td>`).join('')}<td colspan="3"></td>${AS_CODES.map(k=>`<td>${g.sums[k]}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`,'ltr')}
 function loadExcelJS(){return new Promise((ok,bad)=>{if(window.ExcelJS)return ok(window.ExcelJS);const s=document.createElement('script');s.src='exceljs.min.js';s.onload=()=>ok(window.ExcelJS);s.onerror=()=>bad(new Error(L('Could not load the Excel library — check the internet','تعذر تحميل مكتبة Excel — تأكد من الإنترنت')));document.head.appendChild(s)})}
 async function asExcel(y,m){let X;try{notify('⏳ Excel…','info');X=await loadExcelJS()}catch(e){notify(e.message,'err');return}
  const {groups,last,all}=asGroups(y,m);const wb=new X.Workbook();
- const ws=wb.addWorksheet(`${S.tmp.asMode==='heads'?'Heads ':''}${pad(m)}-${y}`,{views:[{state:'frozen',xSplit:3,ySplit:0}]});         // ONE sheet — departments one after another
+ const ws=wb.addWorksheet(`${S.tmp.asMode==='heads'?'Heads ':''}${pad(m)}-${y}`,{views:[{state:'frozen',xSplit:3+asHx(),ySplit:0}]});         // ONE sheet — departments one after another
  const col=n=>{let s='';n++;while(n>0){const r=(n-1)%26;s=String.fromCharCode(65+r)+s;n=Math.floor((n-1)/26)}return s};   // 0-based index → letter
- const dc0=4,dcN=3+last,cCB=4+last,cCR=cCB+1,cNB=cCB+2,cK=cCB+3,W=cK+AS_CODES.length;
+ const hx=asHx(),dc0=4+hx,dcN=3+hx+last,cCB=4+hx+last,cCR=cCB+1,cNB=cCB+2,cK=cCB+3,W=cK+AS_CODES.length;
  const thin={style:'thin',color:{argb:'FF000000'}},bd={top:thin,left:thin,bottom:thin,right:thin};
  const fill=c=>({type:'pattern',pattern:'solid',fgColor:{argb:'FF'+c.replace('#','')}});
- const style=(row,kind)=>{row.height=kind==='h'?22.5:23.25;for(let cn=1;cn<=W;cn++){const ce=row.getCell(cn);ce.border=bd;ce.alignment={horizontal:cn===3&&kind==='r'?'left':'center',vertical:'middle'};
+ const style=(row,kind)=>{row.height=kind==='h'?22.5:23.25;for(let cn=1;cn<=W;cn++){const ce=row.getCell(cn);ce.border=bd;ce.alignment={horizontal:(cn===3||(hx&&cn===4))&&kind==='r'?'left':'center',vertical:'middle'};
    const keep=ce.font&&ce.font.color?{color:ce.font.color}:{};ce.font=Object.assign({name:'Calibri',size:kind==='h'?14:12,bold:kind!=='r'||cn===2},keep)}};
- const addHead=()=>{const hr=ws.addRow(['NO','CL.NO','NAME','OB',...asPeriod(y,m).days.map(d=>d.getDate()),'CB','CR','NB',...AS_CODES]);style(hr,'h');
- for(let cn=1;cn<=W;cn++){const z=cn-1;hr.getCell(cn).fill=fill(z===3||z===cCB||z===cCR||z===cNB?AS_HG:(z>=cK&&z<cK+AS_CODES.length)?AS_HC:AS_HW)}return hr};   // header repeated under every department title
+ const addHead=()=>{const hr=ws.addRow(['NO','CL.NO','NAME',...(hx?['DEPARTMENT']:[]),'OB',...asPeriod(y,m).days.map(d=>d.getDate()),'CB','CR','NB',...AS_CODES]);style(hr,'h');
+ for(let cn=1;cn<=W;cn++){const z=cn-1;hr.getCell(cn).fill=fill(z===3+hx||z===cCB||z===cCR||z===cNB?AS_HG:(z>=cK&&z<cK+AS_CODES.length)?AS_HC:AS_HW)}return hr};   // header repeated under every department title
  const totRows=[];
+ const heads=S.tmp.asMode==='heads',[PB0,PB1]=periodBounds(m,y);
+ [[(DB.settings.company||'')+(DB.settings.company_ar?'  —  '+DB.settings.company_ar:''),19,'1E3A5F','FFFFFF'],
+  [heads?'Head Department Attendance  —  حضور مديري الأقسام':'Monthly Attendance Report  —  التقرير الشهري للحضور والانصراف',16,'E0E7FF','1E3A5F'],
+  [`${MONTHS_EN[m-1]} ${y}   ·   ${dmy(PB0)} → ${dmy(PB1)}`,12,'F8FAFC','475569']].forEach(([t,sz,bg,fc])=>{const r=ws.addRow([t]);ws.mergeCells(r.number,1,r.number,W);r.height=sz+16;
+   const c=r.getCell(1);c.fill=fill(bg);c.font={name:'Calibri',size:sz,bold:true,color:{argb:'FF'+fc}};c.alignment={horizontal:'center',vertical:'middle'};for(let cn=1;cn<=W;cn++)r.getCell(cn).border=bd});
+ ws.addRow([]).height=6;
  for(const g of groups){
   const dr=ws.addRow([g.dep]);ws.mergeCells(dr.number,1,dr.number,W);style(dr,'d');dr.getCell(1).fill=fill('#1E3A5F');dr.getCell(1).font={name:'Calibri',size:13,bold:true,color:{argb:'FFFFFFFF'}};dr.getCell(1).alignment={horizontal:'left',vertical:'middle',indent:1};
   const first=addHead().number+1;
-  g.rows.forEach(r=>{const cid=isNaN(+r.e.emp_id)?r.e.emp_id:+r.e.emp_id;const row=ws.addRow([r.n,cid,r.e.name+(r.hd?' — '+r.hd:''),asI(r.ob),...r.c,null,asI(r.cr)||null,null,...AS_CODES.map(()=>null)]);const rn=row.number;const rng=`${col(dc0)}${rn}:${col(dcN)}${rn}`;
+  g.rows.forEach(r=>{const cid=isNaN(+r.e.emp_id)?r.e.emp_id:+r.e.emp_id;const row=ws.addRow([r.n,cid,r.e.name,...(hx?[r.hd||'']:[]),asI(r.ob),...r.c,null,asI(r.cr)||null,null,...AS_CODES.map(()=>null)]);const rn=row.number;const rng=`${col(dc0)}${rn}:${col(dcN)}${rn}`;
    AS_CODES.forEach((k,j)=>{row.getCell(cK+j+1).value={formula:`COUNTIF(${rng},"${k}")`,result:r.cnt[k]}});
-   row.getCell(cCB+1).value={formula:`${col(3)}${rn}-${col(cK)}${rn}-${col(cK+6)}${rn}`,result:asI(r.cb)};
+   row.getCell(cCB+1).value={formula:`${col(3+hx)}${rn}-${col(cK)}${rn}-${col(cK+6)}${rn}`,result:asI(r.cb)};
    row.getCell(cNB+1).value={formula:`SUM(${col(cCB)}${rn}+${col(cCR)}${rn})`,result:asI(r.nb)};
    r.c.forEach((c,d)=>{const k=AS_COLOR[c];if(k){const ce=row.getCell(dc0+d+1);ce.fill=fill(k[0]);ce.font={color:{argb:'FF'+k[1].replace('#','').padEnd(6,k[1].replace('#',''))}}}});
-   style(row,'r');row.getCell(4).fill=fill('#F2F2F2')});
+   style(row,'r');row.getCell(4+hx).fill=fill('#F2F2F2')});
   const last1=first+g.rows.length-1;
-  const tr=ws.addRow(['','','Total present','',...Array.from({length:last},(_,d)=>({formula:`COUNTIF(${col(dc0+d)}${first}:${col(dc0+d)}${last1},"P")`,result:g.tot[d]})),null,null,null,...AS_CODES.map((k,j)=>({formula:`SUM(${col(cK+j)}${first}:${col(cK+j)}${last1})`,result:g.sums[k]}))]);
-  ws.mergeCells(tr.number,3,tr.number,4);style(tr,'t');for(let cn=3;cn<=dcN+1;cn++)tr.getCell(cn).fill=fill('#FFFF00');totRows.push(tr.number)}
- if(groups.length>1){const gt=ws.addRow(['','','GRAND TOTAL','',...Array.from({length:last},(_,d)=>({formula:totRows.map(r=>`${col(dc0+d)}${r}`).join('+'),result:all.filter(r=>r.c[d]==='P').length})),null,null,null,...AS_CODES.map((k,j)=>({formula:totRows.map(r=>`${col(cK+j)}${r}`).join('+'),result:all.reduce((a,r)=>a+r.cnt[k],0)}))]);
-  ws.mergeCells(gt.number,3,gt.number,4);style(gt,'t');for(let cn=1;cn<=W;cn++)gt.getCell(cn).fill=fill('#FFD966')}
+  const tr=ws.addRow(['','','Total present',...(hx?['']:[]),'',...Array.from({length:last},(_,d)=>({formula:`COUNTIF(${col(dc0+d)}${first}:${col(dc0+d)}${last1},"P")`,result:g.tot[d]})),null,null,null,...AS_CODES.map((k,j)=>({formula:`SUM(${col(cK+j)}${first}:${col(cK+j)}${last1})`,result:g.sums[k]}))]);
+  ws.mergeCells(tr.number,3,tr.number,4+hx);style(tr,'t');for(let cn=3;cn<=dcN+1;cn++)tr.getCell(cn).fill=fill('#FFFF00');totRows.push(tr.number)}
+ if(groups.length>1){const gt=ws.addRow(['','','GRAND TOTAL',...(hx?['']:[]),'',...Array.from({length:last},(_,d)=>({formula:totRows.map(r=>`${col(dc0+d)}${r}`).join('+'),result:all.filter(r=>r.c[d]==='P').length})),null,null,null,...AS_CODES.map((k,j)=>({formula:totRows.map(r=>`${col(cK+j)}${r}`).join('+'),result:all.reduce((a,r)=>a+r.cnt[k],0)}))]);
+  ws.mergeCells(gt.number,3,gt.number,4+hx);style(gt,'t');for(let cn=1;cn<=W;cn++)gt.getCell(cn).fill=fill('#FFD966')}
+ {ws.addRow([]).height=8;const cw=Array.from({length:W},(_,i)=>i===0?7.1:i===1?7.4:i===2?(hx?30:42):(hx&&i===3)?30:i===3+hx?7.3:(i>=dc0&&i<=dcN)?4.6:7.5),T=cw.reduce((a,b)=>a+b,0);let acc=0;const cut=[];cw.forEach((w,i)=>{acc+=w;if(cut.length<2&&acc>=T*(cut.length+1)/3)cut.push(i+1)});const spans=[[2,cut[0]-1],[cut[0]+2,cut[1]-1],[cut[1]+2,W-1]];
+  const sp=ws.addRow([]);sp.height=46;const lr=ws.addRow([]);lr.height=22;const nr=ws.addRow([]);nr.height=16;
+  [['Prepared by','أعدّه'],['HR Manager','مدير الموارد البشرية'],['General Manager','المدير العام']].forEach((s,i)=>{const [a,b]=spans[i];ws.mergeCells(lr.number,a,lr.number,b);ws.mergeCells(nr.number,a,nr.number,b);
+   const c=lr.getCell(a);c.value=`${s[0]}  —  ${s[1]}`;c.font={name:'Calibri',size:12,bold:true,color:{argb:'FF1E3A5F'}};c.alignment={horizontal:'center',vertical:'middle'};
+   for(let cn=a;cn<=b;cn++)lr.getCell(cn).border={top:{style:'medium',color:{argb:'FF1E3A5F'}}};
+   const n=nr.getCell(a);n.value='Name & Signature / Date  —  الاسم والتوقيع / التاريخ';n.font={name:'Calibri',size:9,italic:true,color:{argb:'FF64748B'}};n.alignment={horizontal:'center',vertical:'middle'}})}
  ws.pageSetup={paperSize:9,orientation:'landscape',fitToPage:true,fitToWidth:1,fitToHeight:0,margins:{left:.2,right:.2,top:.3,bottom:.3,header:.1,footer:.1}};
- ws.columns.forEach((c,i)=>{c.width=i===0?7.1:i===1?7.4:i===2?42:i===3?7.3:(i>=dc0&&i<=dcN)?4.6:7.5});
+ ws.columns.forEach((c,i)=>{c.width=i===0?7.1:i===1?7.4:i===2?(hx?30:42):(hx&&i===3)?30:i===3+hx?7.3:(i>=dc0&&i<=dcN)?4.6:7.5});
  const buf=await wb.xlsx.writeBuffer();dlBlob(`${S.tmp.asMode==='heads'?'Head_Department_Attendance':'Attendance'}_${y}-${pad(m)}.xlsx`,new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}));notify(L('Excel downloaded','تم تنزيل ملف Excel'))}
 /* ═══════════ Official (public) holidays ═══════════
    • HR defines the official holidays (one day or a range, e.g. Eid 3 days) in Leaves → Official Holidays
@@ -2740,7 +2817,12 @@ async function onDiag(){const box=$('#onlExtra');box.innerHTML=`<div class="flas
   <b>${L('Connected users','المستخدمون المتصلون')}</b><span>${esc((d.online||[]).map(o=>o.user+(o.client===onClient()?' ('+L('this device','هذا الجهاز')+')':'')).join(' — ')||'—')}</span>
   <b>${L('Response time','زمن الاستجابة')}</b><span>${ms} ms</span>
   <b>${L('Employees (server snapshot / this device)','الموظفين (نسخة الخادم / الجهاز ده)')}</b><span>${d.employees??'—'} / ${Object.keys(DB.employees||{}).length}</span>
-  <b>${L('Program build','نسخة البرنامج')}</b><span>${esc(String(BUILD_ID))}</span></div>
+  <b>${L('Program build','نسخة البرنامج')}</b><span>${esc(String(BUILD_ID))}</span>
+  <b>${L('WhatsApp notifications','إشعارات واتساب')}</b><span>${d.wa&&d.wa.on?'✅ '+L('configured on the server','مضبوطة على الخادم'):'⚠️ '+L('not configured — set WA_PROVIDER/WA_ID/WA_TOKEN in Script properties','غير مضبوطة — حط WA_PROVIDER/WA_ID/WA_TOKEN في Script properties')}</span></div>
+  ${d.wa&&(d.wa.last||[]).length?`<div class="card mt"><h3>💬 ${L('Last WhatsApp attempts','آخر محاولات إرسال واتساب')}</h3><table style="width:100%;font-size:12px;border-collapse:collapse">
+   <tr style="text-align:${S.lang==='ar'?'right':'left'}"><th style="padding:4px 6px">${L('When','الوقت')}</th><th style="padding:4px 6px">${L('Employee #','رقم الموظف')}</th><th style="padding:4px 6px">${L('Event','الحدث')}</th><th style="padding:4px 6px">${L('Result','النتيجة')}</th></tr>
+   ${d.wa.last.slice().reverse().map(x=>`<tr style="border-top:1px solid var(--bd)"><td style="padding:4px 6px">${esc(new Date(x.t).toLocaleString())}</td><td style="padding:4px 6px">${esc(x.emp)}</td><td style="padding:4px 6px">${esc(x.c)}</td><td style="padding:4px 6px">${x.ok?'✅ '+L('sent','وصلت'):'❌ '+esc(x.err||L('failed','فشلت'))}</td></tr>`).join('')}
+   </table></div>`:(d.wa&&d.wa.on?`<div class="flash info mt">${L('Configured, but no WhatsApp attempts recorded yet — the trigger may not have fired for your last action.','مضبوطة، لكن لسه مفيش أي محاولة إرسال مسجّلة — يبقى الحدث لسه ما شغّلش الإرسال.')}</div>`:'')}
   <details class="mt"><summary>${L('Technical details (send a screenshot of this)','تفاصيل فنية (ابعت صورة منها)')}</summary><pre style="direction:ltr;text-align:left;white-space:pre-wrap;font-size:11.5px;background:#F8FAFC;padding:10px;border-radius:8px">${esc(JSON.stringify(Object.assign({},d,{online:undefined,sheet:undefined}),null,0))}
 — ${L('this device','هذا الجهاز')}: ver ${ONL.ver} · status ${ONL.status} ${esc(ONL.err||'')}
 ${(ONL.ev||[]).slice(-25).map(x=>x.t+'  '+x.type+'  '+x.info).join('\n')||'(no sync events)'}</pre></details>
